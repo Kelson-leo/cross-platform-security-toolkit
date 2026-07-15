@@ -36,6 +36,7 @@ jobs:
             sudo apt-get install -y build-essential cmake
 
         - name: Configure and Build
+          shell: bash
           run: |
             cd tools/system-monitor
             mkdir -p build && cd build
@@ -51,6 +52,7 @@ jobs:
 
         - name: Run System Monitor (Windows)
           if: runner.os == 'Windows'
+          shell: bash
           run: |
             cd tools/system-monitor/build/Release
             ./system_monitor.exe
