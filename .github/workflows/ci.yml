@@ -1,0 +1,62 @@
+name: Cross-Platform Build & Test
+
+  on:
+    push:
+      branches: [ main ]
+    pull_request:
+      branches: [ main ]
+
+  jobs:
+    build-and-test:
+      strategy:
+        fail-fast: false
+        matrix:
+          os: [ubuntu-latest, windows-latest]
+
+      runs-on: ${{ matrix.os }}
+
+      steps:
+      # 1. Check out source code
+      - uses: actions/checkout@v4
+
+      # 2. Set up Python (required by Conan)
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3. Install Conan (C++ package manager)
+      - name: Install Conan
+        run: pip install conan
+
+      # 4. Install system dependencies (Linux only)
+      - name: Install Linux Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      # 5. Conan + CMake build
+      - name: Configure and Build
+        run: |
+          cd tools/system-monitor
+          mkdir -p build && cd build
+          conan install .. --build=missing -s build_type=Release
+  --output-folder=.
+          cmake .. -DCMAKE_TOOLCHAIN_FILE=./conan_toolchain.cmake
+  -DCMAKE_BUILD_TYPE=Release
+          cmake --build . --config Release
+
+      # 6. Test — run the binary
+      - name: Run System Monitor (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cd tools/system-monitor/build
+          ./system_monitor
+
+      - name: Run System Monitor (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd tools/system-monitor/build/Release
+          ./system_monitor.exe
+        continue-on-error: false
