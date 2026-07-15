@@ -41,10 +41,8 @@ name: Cross-Platform Build & Test
         run: |
           cd tools/system-monitor
           mkdir -p build && cd build
-          conan install .. --build=missing -s build_type=Release
-  --output-folder=.
-          cmake .. -DCMAKE_TOOLCHAIN_FILE=./conan_toolchain.cmake
-  -DCMAKE_BUILD_TYPE=Release
+          conan install .. --build=missing -s build_type=Release --output-folder=.
+          cmake .. -DCMAKE_TOOLCHAIN_FILE=./conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Release
           cmake --build . --config Release
 
       # 6. Test — run the binary
