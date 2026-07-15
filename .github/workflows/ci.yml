@@ -56,3 +56,17 @@ jobs:
           run: |
             cd tools/system-monitor/build/Release
             ./system_monitor.exe
+
+        - name: Upload Linux Binary (Artifact)
+          if: runner.os == 'Linux'
+          uses: actions/upload-artifact@v4
+          with:
+            name: system_monitor-linux
+            path: tools/system-monitor/build/system_monitor
+
+        - name: Upload Windows Binary (Artifact)
+          if: runner.os == 'Windows'
+          uses: actions/upload-artifact@v4
+          with:
+            name: system_monitor-windows.exe
+            path: tools/system-monitor/build/Release/system_monitor.exe
