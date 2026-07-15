@@ -29,3 +29,7 @@ packet_sniffer
 
 # Dependencies folder
 __pycache__/
+
+# Internal documentation and agent conventions (local only)
+docs/
+CLAUDE.md
