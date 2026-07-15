@@ -108,8 +108,4 @@ This codebase demonstrates:
 
 ## 📝 License
 
-This project is part of my professional portfolio. Feel free to explore and provide feedback!
-
----
-
-**Questions or interested in discussing the implementation?** Feel free to reach out! 🤝
+MIT © 2026 [Kellow101](https://github.com/Kelson-leo)
