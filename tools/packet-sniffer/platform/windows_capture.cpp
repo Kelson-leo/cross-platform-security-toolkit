@@ -54,8 +54,7 @@ public:
         return result;
     }
 
-    bool start_capture(const std::string& interface, const std::string& filter, bool promiscuous) override 
-    {
+    bool start_capture(const std::string& interface_name, const std::string& filter, bool promiscuous) override {
         if (running) {
             spdlog::warn("[Windows] Captura já está rodando na interface {}.", current_interface);
             return true;
@@ -63,22 +62,16 @@ public:
 
         std::memset(error_buffer, 0, PCAP_ERRBUF_SIZE);
 
-        // ------------------------------------------------------------
-        // 3. Same function as Linux
-        // ------------------------------------------------------------
-        pcap_handle = pcap_open_live(interface.c_str(), 65536, promiscuous ? 1 : 0, 1000, error_buffer);
+        pcap_handle = pcap_open_live(interface_name.c_str(), 65536, promiscuous ? 1 : 0, 1000, error_buffer);
 
         if (pcap_handle == nullptr) {
-            spdlog::error("[Windows] Falha ao abrir interface {}: {}", interface, error_buffer);
+            spdlog::error("[Windows] Falha ao abrir interface {}: {}", interface_name, error_buffer);
             return false;
         }
 
-        // ------------------------------------------------------------
-        // 4. BPF filter (same as Linux)
-        // ------------------------------------------------------------
         if (!filter.empty()) {
-            struct bpf_program bpf_code; 
-            
+            struct bpf_program bpf_code;
+
             if (pcap_compile(pcap_handle, &bpf_code, filter.c_str(), 1, PCAP_NETMASK_UNKNOWN) == -1) {
                 spdlog::error("[Windows] Erro ao compilar filtro '{}': {}", filter, pcap_geterr(pcap_handle));
                 pcap_close(pcap_handle);
@@ -99,9 +92,9 @@ public:
         }
 
         running = true;
-        current_interface = interface;
-        spdlog::info("[Windows] Captura iniciada em {} (Modo promíscuo: {}, Filtro: '{}').", 
-                     interface, promiscuous ? "ON" : "OFF", filter.empty() ? "Nenhum" : filter);
+        current_interface = interface_name; // Atualizado para interface_name
+        spdlog::info("[Windows] Captura iniciada em {} (Modo promíscuo: {}, Filtro: '{}').",
+                     interface_name, promiscuous ? "ON" : "OFF", filter.empty() ? "Nenhum" : filter);
         return true;
     }
 
@@ -126,9 +119,6 @@ public:
             return nullptr;
         }
 
-        // ------------------------------------------------------------
-        // 5. Next packet capture (same function)
-        // ------------------------------------------------------------
         struct pcap_pkthdr* header = nullptr;  
         const unsigned char* raw_data = nullptr; 
 
