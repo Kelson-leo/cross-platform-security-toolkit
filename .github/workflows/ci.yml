@@ -82,7 +82,7 @@ jobs:
             if ((Test-Path $conanfile) -and ((Get-Content $conanfile -Raw).Trim().Length -gt 0)) {
               Write-Host "  📦 Running Conan install..."
               conan install .. --build=missing -s build_type=Release --output-folder=.
-              cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE="./conan_toolchain.cmake"
+              cmake .. -DCMAKE_TOOLCHAIN_FILE="./conan_toolchain.cmake" -A x64
             } else {
               Write-Host "  ⚡ No Conan dependencies, using VS generator directly..."
               cmake .. -G "Visual Studio 17 2022" -A x64
