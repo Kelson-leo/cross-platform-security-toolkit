@@ -1,6 +1,7 @@
 [requires]
 spdlog/1.14.1
 libpcap/1.10.5 
+gtest/1.14.0
 
 [generators]
 CMakeDeps
