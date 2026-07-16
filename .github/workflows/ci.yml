@@ -102,7 +102,8 @@ jobs:
             Push-Location build
 
             $conanfile = Join-Path .. "conanfile.txt"
-            if ((Test-Path $conanfile) -and ((Get-Content $conanfile -Raw).Trim().Length -gt 0)) {
+            $conanContent = Get-Content $conanfile -Raw -ErrorAction SilentlyContinue
+            if ((Test-Path $conanfile) -and ($null -ne $conanContent) -and ($conanContent.Trim().Length -gt 0)) {
               Write-Host "  📦 Running Conan install..."
               conan install .. --build=missing -s build_type=Release --output-folder=.
               cmake .. -DCMAKE_TOOLCHAIN_FILE="./conan_toolchain.cmake" -A x64
