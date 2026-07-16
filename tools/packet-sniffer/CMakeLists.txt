@@ -5,7 +5,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(spdlog REQUIRED)
-find_package(libpcap REQUIRED)  # Conan vai prover isso
+find_package(libpcap REQUIRED)
+find_package(GTest REQUIRED)
 
 add_executable(packet_sniffer
     src/main.cpp

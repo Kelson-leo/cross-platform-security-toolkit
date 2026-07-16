@@ -1,7 +1,6 @@
 [requires]
 spdlog/1.14.1
-# libpcap - funciona no Linux e Windows (WinPcap/Npcap)
-libpcap/1.10.4
+libpcap/1.10.5 
 
 [generators]
 CMakeDeps
