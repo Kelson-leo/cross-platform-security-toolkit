@@ -36,34 +36,32 @@ jobs:
         sudo apt-get install -y build-essential cmake
 
     # ------------------------------------------------------------
-    # Dynamic loop through tools/
+    # 1. BUILD ALL C++ PROJECTS (System Monitor, Sniffer, Hybrid Backend)
     # ------------------------------------------------------------
-    - name: Build All Tools
+    - name: Build All C++ Tools
       shell: bash
       run: |
-        # Encontra todas as pastas dentro de tools/ que têm CMakeLists.txt
         for TOOL in tools/*/; do
           if [ -f "${TOOL}CMakeLists.txt" ]; then
-            echo "🛠️ Building tool: ${TOOL}"
+            echo "🛠️ Building C++ tool: ${TOOL}"
             cd "${TOOL}"
             mkdir -p build && cd build
             
-            # Conan e CMake (mesmo fluxo que você já usa)
+            # Conan e CMake
             conan install .. --build=missing -s build_type=Release --output-folder=.
             cmake .. -DCMAKE_TOOLCHAIN_FILE=./conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Release
             cmake --build . --config Release
             
-            # Volta para a raiz do repo para a próxima iteração
-            cd ../../..
+            cd ../..
           else
             echo "⚠️ Pulando ${TOOL} (sem CMakeLists.txt)"
           fi
         done
 
     # ------------------------------------------------------------
-    # Roda TODOS os executáveis encontrados (Teste de integração)
+    # 2. RUN C++ PROJECTS TESTS (Linux)
     # ------------------------------------------------------------
-    - name: Run All Tools (Linux)
+    - name: Run C++ Tests (Linux)
       if: runner.os == 'Linux'
       shell: bash
       run: |
@@ -73,32 +71,54 @@ jobs:
             "${TOOL}build/system_monitor"
           fi
           if [ -f "${TOOL}build/packet_sniffer" ]; then
-            echo "▶️ Executando Packet Sniffer (precisa de sudo, mas no CI tem permissão)..."
-            # No GitHub Actions Linux, o runner tem permissões especiais para capturar pacotes de loopback (lo)
-            # mas para evitar erro, vamos usar timeout de 2 segundos para não travar
+            echo "▶️ Executando Packet Sniffer..."
             timeout 2s "${TOOL}build/packet_sniffer" || true
           fi
         done
 
-    - name: Run All Tools (Windows)
+    - name: Run C++ Tests (Windows)
       if: runner.os == 'Windows'
       shell: bash
       run: |
         for TOOL in tools/*/; do
-          # No Windows, os executáveis ficam em build/Release/
           if [ -f "${TOOL}build/Release/system_monitor.exe" ]; then
             echo "▶️ Executando System Monitor..."
             "${TOOL}build/Release/system_monitor.exe"
           fi
           if [ -f "${TOOL}build/Release/packet_sniffer.exe" ]; then
-            echo "▶️ Executando Packet Sniffer (Windows)..."
-            # Usamos timeout via PowerShell para não travar
+            echo "▶️ Executando Packet Sniffer..."
             powershell -Command "Start-Process -FilePath '${TOOL}build/Release/packet_sniffer.exe' -Wait" || true
           fi
         done
 
     # ------------------------------------------------------------
-    # Upload dos Artefatos (Para recrutadores baixarem)
+    # 3. 🆕 BUILD C# PROJECTS (Hybrid Detector) - WINDOWS ONLY
+    # ------------------------------------------------------------
+    - name: Setup .NET SDK
+      if: runner.os == 'Windows'
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Build and Run Hybrid Detector (C# + C++ Interop)
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        echo "🔷 Compilando o frontend C#..."
+        cd tools/hybrid-detector/csharp_frontend
+        dotnet build -c Release
+        
+        echo "🔷 Copiando a DLL C++ para a pasta do C#..."
+        # A DLL gerada pelo CMake fica em cpp_backend/build/Release/
+        cp ../cpp_backend/build/Release/hybrid_backend.dll ./bin/Release/net8.0/ || cp ../cpp_backend/build/hybrid_backend.dll ./bin/Release/net8.0/
+        
+        echo "🔷 Executando o Hybrid Detector (teste de integração)..."
+        cd ./bin/Release/net8.0/
+        ./HybridDetector.exe
+        echo "✅ Hybrid Detector executado com sucesso!"
+
+    # ------------------------------------------------------------
+    # 4. UPLOAD ARTEFACTS
     # ------------------------------------------------------------
     - name: Upload Linux Artifacts
       if: runner.os == 'Linux'
@@ -108,6 +128,7 @@ jobs:
         path: |
           tools/system-monitor/build/system_monitor
           tools/packet-sniffer/build/packet_sniffer
+          # (O backend do hybrid não gera executável no Linux, apenas DLL Windows)
 
     - name: Upload Windows Artifacts
       if: runner.os == 'Windows'
@@ -117,3 +138,5 @@ jobs:
         path: |
           tools/system-monitor/build/Release/system_monitor.exe
           tools/packet-sniffer/build/Release/packet_sniffer.exe
+          tools/hybrid-detector/cpp_backend/build/Release/hybrid_backend.dll
+          tools/hybrid-detector/csharp_frontend/bin/Release/net8.0/HybridDetector.exe
