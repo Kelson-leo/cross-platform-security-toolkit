@@ -27,3 +27,21 @@ target_link_libraries(packet_sniffer
     spdlog::spdlog
     libpcap::libpcap
 )
+
+# ------------------------------------------------------------
+# Tests using GTest
+# ------------------------------------------------------------
+enable_testing()
+
+add_executable(test_packet_sniffer
+    tests/test_interface.cpp
+)
+
+target_link_libraries(test_packet_sniffer
+    GTest::gtest_main
+)
+
+target_include_directories(test_packet_sniffer PRIVATE include)
+
+# Registra o teste no CTest
+add_test(NAME PacketSnifferTests COMMAND test_packet_sniffer)

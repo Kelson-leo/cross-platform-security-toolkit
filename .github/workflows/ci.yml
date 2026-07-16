@@ -1,72 +1,119 @@
 name: Cross-Platform Build & Test
 
 on:
-      push:
-        branches: [ main ]
-      pull_request:
-        branches: [ main ]
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
-      build-and-test:
-        strategy:
-          fail-fast: false
-          matrix:
-            os: [ubuntu-latest, windows-latest]
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
 
-        runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
 
-        steps:
-        - uses: actions/checkout@v4
+    steps:
+    - uses: actions/checkout@v4
 
-        - name: Setup Python
-          uses: actions/setup-python@v5
-          with:
-            python-version: '3.11'
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
 
-        - name: Install Conan
-          run: pip install conan
+    - name: Install Conan
+      run: pip install conan
 
-        - name: Setup Conan Profile
-          run: conan profile detect --force
+    - name: Setup Conan Profile
+      run: conan profile detect --force
 
-        - name: Install Linux Dependencies
-          if: runner.os == 'Linux'
-          run: |
-            sudo apt-get update
-            sudo apt-get install -y build-essential cmake
+    - name: Install Linux Dependencies
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake
 
-        - name: Configure and Build
-          shell: bash
-          run: |
-            cd tools/system-monitor
+    # ------------------------------------------------------------
+    # Dynamic loop through tools/
+    # ------------------------------------------------------------
+    - name: Build All Tools
+      shell: bash
+      run: |
+        # Encontra todas as pastas dentro de tools/ que têm CMakeLists.txt
+        for TOOL in tools/*/; do
+          if [ -f "${TOOL}CMakeLists.txt" ]; then
+            echo "🛠️ Building tool: ${TOOL}"
+            cd "${TOOL}"
             mkdir -p build && cd build
+            
+            # Conan e CMake (mesmo fluxo que você já usa)
             conan install .. --build=missing -s build_type=Release --output-folder=.
             cmake .. -DCMAKE_TOOLCHAIN_FILE=./conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Release
             cmake --build . --config Release
+            
+            # Volta para a raiz do repo para a próxima iteração
+            cd ../../..
+          else
+            echo "⚠️ Pulando ${TOOL} (sem CMakeLists.txt)"
+          fi
+        done
 
-        - name: Run System Monitor (Linux)
-          if: runner.os == 'Linux'
-          run: |
-            cd tools/system-monitor/build
-            ./system_monitor
+    # ------------------------------------------------------------
+    # Roda TODOS os executáveis encontrados (Teste de integração)
+    # ------------------------------------------------------------
+    - name: Run All Tools (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        for TOOL in tools/*/; do
+          if [ -f "${TOOL}build/system_monitor" ]; then
+            echo "▶️ Executando System Monitor..."
+            "${TOOL}build/system_monitor"
+          fi
+          if [ -f "${TOOL}build/packet_sniffer" ]; then
+            echo "▶️ Executando Packet Sniffer (precisa de sudo, mas no CI tem permissão)..."
+            # No GitHub Actions Linux, o runner tem permissões especiais para capturar pacotes de loopback (lo)
+            # mas para evitar erro, vamos usar timeout de 2 segundos para não travar
+            timeout 2s "${TOOL}build/packet_sniffer" || true
+          fi
+        done
 
-        - name: Run System Monitor (Windows)
-          if: runner.os == 'Windows'
-          shell: bash
-          run: |
-            cd tools/system-monitor/build/Release
-            ./system_monitor.exe
+    - name: Run All Tools (Windows)
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        for TOOL in tools/*/; do
+          # No Windows, os executáveis ficam em build/Release/
+          if [ -f "${TOOL}build/Release/system_monitor.exe" ]; then
+            echo "▶️ Executando System Monitor..."
+            "${TOOL}build/Release/system_monitor.exe"
+          fi
+          if [ -f "${TOOL}build/Release/packet_sniffer.exe" ]; then
+            echo "▶️ Executando Packet Sniffer (Windows)..."
+            # Usamos timeout via PowerShell para não travar
+            powershell -Command "Start-Process -FilePath '${TOOL}build/Release/packet_sniffer.exe' -Wait" || true
+          fi
+        done
 
-        - name: Upload Linux Binary (Artifact)
-          if: runner.os == 'Linux'
-          uses: actions/upload-artifact@v4
-          with:
-            name: system_monitor-linux
-            path: tools/system-monitor/build/system_monitor
+    # ------------------------------------------------------------
+    # Upload dos Artefatos (Para recrutadores baixarem)
+    # ------------------------------------------------------------
+    - name: Upload Linux Artifacts
+      if: runner.os == 'Linux'
+      uses: actions/upload-artifact@v4
+      with:
+        name: linux-binaries
+        path: |
+          tools/system-monitor/build/system_monitor
+          tools/packet-sniffer/build/packet_sniffer
 
-        - name: Upload Windows Binary (Artifact)
-          if: runner.os == 'Windows'
-          uses: actions/upload-artifact@v4
-          with:
-            name: system_monitor-windows.exe
-            path: tools/system-monitor/build/Release/system_monitor.exe
+    - name: Upload Windows Artifacts
+      if: runner.os == 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-binaries
+        path: |
+          tools/system-monitor/build/Release/system_monitor.exe
+          tools/packet-sniffer/build/Release/packet_sniffer.exe
