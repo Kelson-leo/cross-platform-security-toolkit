@@ -1,6 +1,12 @@
 # 🛡️ Cross-Platform Security Toolkit
 
-[![Cross-Platform Build & Test](https://github.com/Kelson-leo/cross-platform-security-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/Kelson-leo/cross-platform-security-toolkit/actions/workflows/ci.yml)
+[![CI Build & Test](https://github.com/Kelson-leo/cross-platform-security-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/Kelson-leo/cross-platform-security-toolkit/actions/workflows/ci.yml)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-blue?logo=c%2B%2B)](https://en.cppreference.com/w/cpp/20)
+[![.NET 8](https://img.shields.io/badge/.NET-8.0-purple?logo=dotnet)](https://dotnet.microsoft.com/en-us/download/dotnet/8.0)
+[![License MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)]()
+[![CMake](https://img.shields.io/badge/CMake-3.20%2B-red?logo=cmake)](https://cmake.org)
+[![Conan](https://img.shields.io/badge/Conan-2.x-blue?logo=conan)](https://conan.io)
 
 > *A modular C++20 toolkit for systems programming and threat detection primitives, designed to run natively on both Windows and Linux.*
 

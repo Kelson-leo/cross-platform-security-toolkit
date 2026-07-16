@@ -42,25 +42,40 @@ jobs:
       if: runner.os == 'Linux'
       shell: bash
       run: |
-        for TOOL in tools/*/; do
-          if [ -f "${TOOL}CMakeLists.txt" ]; then
-            echo "🛠️ Building C++ tool: ${TOOL}"
-            cd "${TOOL}"
-            mkdir -p build && cd build
+        build_cmake_project() {
+          local PROJ_DIR="$1"
+          echo "🛠️ Building C++ tool: ${PROJ_DIR}"
+          cd "${PROJ_DIR}"
+          mkdir -p build && cd build
 
-            # Conan e CMake (pula conan se conanfile.txt estiver vazio)
-            if [ -f ../conanfile.txt ] && [ -s ../conanfile.txt ]; then
-              echo "  📦 Running Conan install..."
-              conan install .. --build=missing -s build_type=Release --output-folder=.
-              cmake .. -DCMAKE_TOOLCHAIN_FILE=./conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Release
-            else
-              echo "  ⚡ No Conan dependencies, using CMake directly..."
-              cmake .. -DCMAKE_BUILD_TYPE=Release
-            fi
-            cmake --build . --config Release
-
-            cd ../..
+          if [ -f ../conanfile.txt ] && [ -s ../conanfile.txt ]; then
+            echo "  📦 Running Conan install..."
+            conan install .. --build=missing -s build_type=Release --output-folder=.
+            cmake .. -DCMAKE_TOOLCHAIN_FILE=./conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Release
           else
+            echo "  ⚡ No Conan dependencies, using CMake directly..."
+            cmake .. -DCMAKE_BUILD_TYPE=Release
+          fi
+          cmake --build . --config Release
+
+          cd "${GITHUB_WORKSPACE}"
+        }
+
+        for TOOL in tools/*/; do
+          FOUND=0
+          # Check root CMakeLists.txt
+          if [ -f "${TOOL}CMakeLists.txt" ]; then
+            build_cmake_project "${TOOL}"
+            FOUND=1
+          fi
+          # Check immediate subdirectories (e.g. hybrid-detector/cpp_backend/)
+          for SUB in "${TOOL}"*/; do
+            if [ -f "${SUB}CMakeLists.txt" ]; then
+              build_cmake_project "${SUB}"
+              FOUND=1
+            fi
+          done
+          if [ $FOUND -eq 0 ]; then
             echo "⚠️ Pulando ${TOOL} (sem CMakeLists.txt)"
           fi
         done
@@ -71,10 +86,18 @@ jobs:
       run: |
         $tools = Get-ChildItem -Directory tools/*
         foreach ($t in $tools) {
-          $cm = Join-Path $t.FullName "CMakeLists.txt"
-          if (Test-Path $cm) {
-            Write-Host "🛠️ Building C++ tool: $($t.Name)"
-            Push-Location $t.FullName
+          # Search CMakeLists.txt in root + immediate subdirectories (depth 1)
+          $cmFiles = @(Get-ChildItem -Path $t.FullName -Filter "CMakeLists.txt" -Depth 1 -File)
+          if ($cmFiles.Count -eq 0) {
+            Write-Host "⚠️ Skipping $($t.Name) (no CMakeLists.txt)"
+            continue
+          }
+          foreach ($cm in $cmFiles) {
+            $projDir = $cm.DirectoryName
+            $displayName = if ($projDir -eq $t.FullName) { $t.Name } else { "$($t.Name)/$(Split-Path $projDir -Leaf)" }
+            Write-Host "🛠️ Building C++ tool: $displayName"
+
+            Push-Location $projDir
             if (-not (Test-Path build)) { New-Item -ItemType Directory -Path build | Out-Null }
             Push-Location build
 
@@ -91,8 +114,6 @@ jobs:
             cmake --build . --config Release
             Pop-Location
             Pop-Location
-          } else {
-            Write-Host "⚠️ Skipping $($t.Name) (no CMakeLists.txt)"
           }
         }
 
@@ -151,19 +172,28 @@ jobs:
 
         Write-Host "🔷 Copiando a DLL C++ para a pasta do C#..."
         $dest = Join-Path $PWD "bin/Release/net8.0"
-        $src1 = Join-Path $PWD "..\cpp_backend\build\Release\hybrid_backend.dll"
-        $src2 = Join-Path $PWD "..\cpp_backend\build\hybrid_backend.dll"
-
-        if (Test-Path $src1) {
-          Copy-Item $src1 -Destination $dest -Force
-          Write-Host "✅ DLL copiada: $src1 -> $dest"
-        } elseif (Test-Path $src2) {
-          Copy-Item $src2 -Destination $dest -Force
-          Write-Host "✅ DLL copiada: $src2 -> $dest"
-        } else {
+        $dllSources = @(
+          (Join-Path $PWD "..\cpp_backend\build\Release\hybrid_backend.dll"),
+          (Join-Path $PWD "..\cpp_backend\build\Debug\hybrid_backend.dll"),
+          (Join-Path $PWD "..\cpp_backend\build\hybrid_backend.dll")
+        )
+        $found = $false
+        foreach ($src in $dllSources) {
+          if (Test-Path $src) {
+            Copy-Item $src -Destination $dest -Force
+            Write-Host "✅ DLL copiada: $src -> $dest"
+            $found = $true
+            break
+          }
+        }
+        if (-not $found) {
           Write-Host "❌ ERRO: hybrid_backend.dll não encontrada!"
           Write-Host "Conteúdo de ../cpp_backend/build/:"
-          Get-ChildItem -Recurse -Force ..\cpp_backend\build | ForEach-Object { Write-Host "  $($_.FullName)" }
+          if (Test-Path ..\cpp_backend\build) {
+            Get-ChildItem -Recurse -Force ..\cpp_backend\build | ForEach-Object { Write-Host "  $($_.FullName)" }
+          } else {
+            Write-Host "  ⚠️ Diretório build/ não existe!"
+          }
           Pop-Location
           exit 1
         }
