@@ -17,7 +17,7 @@ This repository is my engineering portfolio, demonstrating **modern C++ systems 
 **Why a Monorepo?**
 - Showcases software architecture (shared `common/` libraries, independent tools).
 - Proves ability to manage CI/CD pipelines for multiple platforms simultaneously.
-- Gives recruiters a single entry point to evaluate my full technical range.
+- Single entry point to evaluate technical range.
 
 ## 🧰 Toolkit Components
 
