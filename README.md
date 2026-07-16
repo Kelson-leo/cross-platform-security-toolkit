@@ -18,8 +18,8 @@ This repository is my engineering portfolio, demonstrating **modern C++ systems 
 | Tool | Focus | Tech Stack | Cross-Platform |
 | :--- | :--- | :--- | :--- |
 | **System Monitor** | Process enumeration & memory tracking | WinAPI (`CreateToolhelp32Snapshot`), Linux `/proc` | ✅ Windows, Linux |
-| *Packet Sniffer* (WIP) | Raw network traffic analysis | `libpcap`/WinPcap, TCP/IP parsing | ⚡ Planned |
-| *Hybrid Detector* (WIP) | C++/C# Interop & Threat Hooking | P/Invoke, WPF GUI | ⚠️ Windows Native |
+| **Packet Sniffer** | Raw network traffic capture & analysis | `libpcap`/WinPcap, TCP/IP parsing | ✅ Windows, Linux |
+| **Hybrid Detector** | C++/C# Interop & Threat Hooking | P/Invoke, .NET 8, C++ DLL backend | ⚠️ Windows Native |
 
 *(Check the `/tools` directory for each individual project.)*
 
@@ -31,54 +31,82 @@ This repository is my engineering portfolio, demonstrating **modern C++ systems 
 2. Click on the latest workflow run (green ✅)
 3. Scroll down to **Artifacts**
 4. Download:
-   - `system_monitor-linux` (Linux)
-   - `system_monitor-windows.exe` (Windows)
+   - `linux-binaries` — System Monitor + Packet Sniffer (Linux)
+   - `windows-binaries` — System Monitor + Packet Sniffer + Hybrid Detector (Windows)
 
 **Run:**
+
 ```bash
 # Linux
 ./system_monitor
+sudo ./packet_sniffer    # requires root for packet capture
 
-# Windows
-system_monitor.exe
+# Windows (PowerShell)
+.\system_monitor.exe
+.\packet_sniffer.exe      # run as Administrator
+.\HybridDetector.exe      # C# frontend with C++ backend DLL
 ```
 
 ## 🔧 Build Instructions (The Professional Way)
 
 This project uses **Conan 2.0** + **CMake** with a strict separation of build artifacts.
 
-To compile **System Monitor**:
+### System Monitor & Packet Sniffer (C++ with Conan)
 
 ```bash
-cd tools/system-monitor
+cd tools/<tool-name>
 mkdir -p build && cd build
 conan install .. --build=missing -s build_type=Release --output-folder=.
 cmake .. -DCMAKE_TOOLCHAIN_FILE=./conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Release
 cmake --build . --config Release
 ```
 
-Run it:
+### Hybrid Detector (C++ DLL + C# Frontend)
+
+Requires **.NET 8 SDK** and **MSVC** (Windows only).
+
+```bash
+# 1. Build the C++ backend DLL
+cd tools/hybrid-detector/cpp_backend
+mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake --build . --config Release
+
+# 2. Build and run the C# frontend
+cd ../../csharp_frontend
+dotnet build -c Release
+cp ../cpp_backend/build/Release/hybrid_backend.dll ./bin/Release/net8.0/
+dotnet run
+```
+
+### Run the executables
 
 ```bash
 # Linux
 ./system_monitor
+sudo ./packet_sniffer          # requires root
 
 # Windows
 ./Release/system_monitor.exe
+./Release/packet_sniffer.exe   # run as Administrator
+./HybridDetector.exe           # from csharp_frontend/bin/Release/net8.0/
 ```
 
 ## 📋 Requirements
 
-- **CMake** 3.15+
+- **CMake** 3.20+
 - **Conan** 2.0+
 - **C++20 compiler** (MSVC 2019+, GCC 11+, Clang 13+)
-- **Linux**: build-essential, cmake
-- **Windows**: Visual Studio Build Tools or MSVC
+- **.NET 8 SDK** (Hybrid Detector only, Windows)
+- **Linux**: build-essential, cmake, libpcap-dev
+- **Windows**: Visual Studio 2022 with C++ workload, Npcap SDK
 
 ## 🚀 CI/CD Pipeline
 
 This project features **automated cross-platform builds** via GitHub Actions:
 - ✅ Builds on Ubuntu and Windows
+- ✅ C++ tools compiled with Conan + CMake (Linux: Makefiles, Windows: MSVC)
+- ✅ C# Hybrid Detector built with .NET 8 SDK (Windows only)
 - ✅ Runs tests on both platforms
 - ✅ Uploads compiled binaries as artifacts for easy access
 
@@ -87,24 +115,43 @@ This project features **automated cross-platform builds** via GitHub Actions:
 ```
 cross-platform-security-toolkit/
 ├── tools/
-│   ├── system-monitor/          # Process & memory monitoring tool
-│   │   ├── src/
+│   ├── system-monitor/            # Process & memory monitoring
+│   │   ├── include/               # IProcessEnumerator interface
+│   │   ├── platform/              # linux_enumerator, windows_enumerator
+│   │   ├── src/                   # main.cpp
+│   │   ├── tests/                 # GTest unit tests
 │   │   ├── CMakeLists.txt
-│   │   └── conanfile.py
-│   └── ...                       # Future tools
-├── common/                       # Shared libraries & utilities
-├── .github/workflows/            # CI/CD pipelines
+│   │   └── conanfile.txt
+│   ├── packet-sniffer/            # Raw packet capture & analysis
+│   │   ├── include/               # IPacketCapture interface
+│   │   ├── platform/              # linux_capture (libpcap), windows_capture (Npcap)
+│   │   ├── src/                   # main.cpp
+│   │   ├── tests/                 # GTest unit tests
+│   │   ├── CMakeLists.txt
+│   │   └── conanfile.txt
+│   └── hybrid-detector/           # C++/C# interop demo
+│       ├── cpp_backend/           # C++ DLL (status provider)
+│       │   ├── include/
+│       │   ├── src/
+│       │   ├── CMakeLists.txt
+│       │   └── conanfile.txt
+│       └── csharp_frontend/       # .NET 8 console app (P/Invoke)
+│           ├── Program.cs
+│           └── HybridDetector.csproj
+├── common/                        # Shared libraries & utilities
+├── .github/workflows/             # CI/CD pipelines
 └── README.md
 ```
 
 ## 🎓 Learning Resources
 
 This codebase demonstrates:
-- **Modern C++20** features (concepts, modules, coroutines)
-- **Cross-platform systems programming** (WinAPI, POSIX)
-- **Build system mastery** (CMake, Conan)
-- **Professional CI/CD** (GitHub Actions)
-- **Memory safety** and low-level debugging techniques
+- **Modern C++20** — concepts, smart pointers, RAII, STL algorithms
+- **Cross-platform systems programming** — WinAPI (`CreateToolhelp32Snapshot`, `GetVersionEx`), Linux (`/proc`, `libpcap`)
+- **Multi-language interop** — C++ DLL + C# P/Invoke (`[DllImport]`)
+- **Build system mastery** — CMake 3.20+, Conan 2.x, Visual Studio generator
+- **Professional CI/CD** — GitHub Actions with OS-specific build matrices
+- **Memory safety** — RAII wrappers for OS handles (`CloseHandle`, `pcap_close`)
 
 ## 📝 License
 

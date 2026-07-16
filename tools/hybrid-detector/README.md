@@ -22,37 +22,39 @@ Modern security tools (like NordVPN's Threat Protection) often use C++ for perfo
         ▲                                           ▲
         │                                           │
         └────────────── .NET 8 ─────────────────────┘
+```
 
+---
 
-🔧 How to Build
-Prerequisites
+## 🔧 How to Build
+### Prerequisites
 
-    C++ Compiler: MSVC (Windows) or MinGW (Linux cross-compile).
+- **C++ Compiler**: MSVC (Windows) or MinGW (Linux cross-compile).
+- **.NET 8 SDK**: Required to build and run the C# project.
 
-    .NET 8 SDK: Required to build and run the C# project.
+### 1. Build the C++ DLL
 
-1. Build the C++ DLL
-
-Windows (MSVC):
-bash
-
+**Windows (MSVC):**
+```bash
 cd cpp_backend
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . --config Release
 # The DLL will be in build/Release/hybrid_backend.dll
+```
 
-Linux (Cross-compile for Windows):
-bash
-
+**Linux (Cross-compile for Windows):**
+```bash
 cd cpp_backend
 x86_64-w64-mingw32-g++ -shared -o hybrid_backend.dll src/status_provider.cpp -I./include
+```
 
-2. Build and Run the C# Frontend
-bash
+### 2. Build and Run the C# Frontend
 
+```bash
 cd csharp_frontend
 dotnet build
 dotnet run
+```
 
-(Note: On Linux, the DLL won't load. Run this on Windows or use Wine for full testing.)
+> **Note:** On Linux, the DLL won't load. Run this on Windows or use Wine for full testing.

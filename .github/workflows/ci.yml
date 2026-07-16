@@ -38,7 +38,8 @@ jobs:
     # ------------------------------------------------------------
     # 1. BUILD ALL C++ PROJECTS (System Monitor, Sniffer, Hybrid Backend)
     # ------------------------------------------------------------
-    - name: Build All C++ Tools
+    - name: Build All C++ Tools (Linux)
+      if: runner.os == 'Linux'
       shell: bash
       run: |
         for TOOL in tools/*/; do
@@ -46,17 +47,54 @@ jobs:
             echo "🛠️ Building C++ tool: ${TOOL}"
             cd "${TOOL}"
             mkdir -p build && cd build
-            
-            # Conan e CMake
-            conan install .. --build=missing -s build_type=Release --output-folder=.
-            cmake .. -DCMAKE_TOOLCHAIN_FILE=./conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Release
+
+            # Conan e CMake (pula conan se conanfile.txt estiver vazio)
+            if [ -f ../conanfile.txt ] && [ -s ../conanfile.txt ]; then
+              echo "  📦 Running Conan install..."
+              conan install .. --build=missing -s build_type=Release --output-folder=.
+              cmake .. -DCMAKE_TOOLCHAIN_FILE=./conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Release
+            else
+              echo "  ⚡ No Conan dependencies, using CMake directly..."
+              cmake .. -DCMAKE_BUILD_TYPE=Release
+            fi
             cmake --build . --config Release
-            
+
             cd ../..
           else
             echo "⚠️ Pulando ${TOOL} (sem CMakeLists.txt)"
           fi
         done
+
+    - name: Build All C++ Tools (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $tools = Get-ChildItem -Directory tools/*
+        foreach ($t in $tools) {
+          $cm = Join-Path $t.FullName "CMakeLists.txt"
+          if (Test-Path $cm) {
+            Write-Host "🛠️ Building C++ tool: $($t.Name)"
+            Push-Location $t.FullName
+            if (-not (Test-Path build)) { New-Item -ItemType Directory -Path build | Out-Null }
+            Push-Location build
+
+            $conanfile = Join-Path .. "conanfile.txt"
+            if ((Test-Path $conanfile) -and ((Get-Content $conanfile -Raw).Trim().Length -gt 0)) {
+              Write-Host "  📦 Running Conan install..."
+              conan install .. --build=missing -s build_type=Release --output-folder=.
+              cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE="./conan_toolchain.cmake"
+            } else {
+              Write-Host "  ⚡ No Conan dependencies, using VS generator directly..."
+              cmake .. -G "Visual Studio 17 2022" -A x64
+            }
+
+            cmake --build . --config Release
+            Pop-Location
+            Pop-Location
+          } else {
+            Write-Host "⚠️ Skipping $($t.Name) (no CMakeLists.txt)"
+          }
+        }
 
     # ------------------------------------------------------------
     # 2. RUN C++ PROJECTS TESTS (Linux)
@@ -78,18 +116,21 @@ jobs:
 
     - name: Run C++ Tests (Windows)
       if: runner.os == 'Windows'
-      shell: bash
+      shell: pwsh
       run: |
-        for TOOL in tools/*/; do
-          if [ -f "${TOOL}build/Release/system_monitor.exe" ]; then
-            echo "▶️ Executando System Monitor..."
-            "${TOOL}build/Release/system_monitor.exe"
-          fi
-          if [ -f "${TOOL}build/Release/packet_sniffer.exe" ]; then
-            echo "▶️ Executando Packet Sniffer..."
-            powershell -Command "Start-Process -FilePath '${TOOL}build/Release/packet_sniffer.exe' -Wait" || true
-          fi
-        done
+        $tools = Get-ChildItem -Directory tools/*
+        foreach ($t in $tools) {
+          $sysmon = Join-Path $t.FullName "build/Release/system_monitor.exe"
+          $sniffer = Join-Path $t.FullName "build/Release/packet_sniffer.exe"
+          if (Test-Path $sysmon) {
+            Write-Host "▶️ Executando System Monitor..."
+            & $sysmon
+          }
+          if (Test-Path $sniffer) {
+            Write-Host "▶️ Executando Packet Sniffer..."
+            Start-Process -FilePath $sniffer -Wait -NoNewWindow
+          }
+        }
 
     # ------------------------------------------------------------
     # 3. 🆕 BUILD C# PROJECTS (Hybrid Detector) - WINDOWS ONLY
@@ -102,20 +143,37 @@ jobs:
 
     - name: Build and Run Hybrid Detector (C# + C++ Interop)
       if: runner.os == 'Windows'
-      shell: bash
+      shell: pwsh
       run: |
-        echo "🔷 Compilando o frontend C#..."
-        cd tools/hybrid-detector/csharp_frontend
+        Write-Host "🔷 Compilando o frontend C#..."
+        Push-Location tools/hybrid-detector/csharp_frontend
         dotnet build -c Release
-        
-        echo "🔷 Copiando a DLL C++ para a pasta do C#..."
-        # A DLL gerada pelo CMake fica em cpp_backend/build/Release/
-        cp ../cpp_backend/build/Release/hybrid_backend.dll ./bin/Release/net8.0/ || cp ../cpp_backend/build/hybrid_backend.dll ./bin/Release/net8.0/
-        
-        echo "🔷 Executando o Hybrid Detector (teste de integração)..."
-        cd ./bin/Release/net8.0/
-        ./HybridDetector.exe
-        echo "✅ Hybrid Detector executado com sucesso!"
+
+        Write-Host "🔷 Copiando a DLL C++ para a pasta do C#..."
+        $dest = Join-Path $PWD "bin/Release/net8.0"
+        $src1 = Join-Path $PWD "..\cpp_backend\build\Release\hybrid_backend.dll"
+        $src2 = Join-Path $PWD "..\cpp_backend\build\hybrid_backend.dll"
+
+        if (Test-Path $src1) {
+          Copy-Item $src1 -Destination $dest -Force
+          Write-Host "✅ DLL copiada: $src1 -> $dest"
+        } elseif (Test-Path $src2) {
+          Copy-Item $src2 -Destination $dest -Force
+          Write-Host "✅ DLL copiada: $src2 -> $dest"
+        } else {
+          Write-Host "❌ ERRO: hybrid_backend.dll não encontrada!"
+          Write-Host "Conteúdo de ../cpp_backend/build/:"
+          Get-ChildItem -Recurse -Force ..\cpp_backend\build | ForEach-Object { Write-Host "  $($_.FullName)" }
+          Pop-Location
+          exit 1
+        }
+
+        Write-Host "🔷 Executando o Hybrid Detector (teste de integração)..."
+        Push-Location $dest
+        .\HybridDetector.exe
+        Write-Host "✅ Hybrid Detector executado com sucesso!"
+        Pop-Location
+        Pop-Location
 
     # ------------------------------------------------------------
     # 4. UPLOAD ARTEFACTS
