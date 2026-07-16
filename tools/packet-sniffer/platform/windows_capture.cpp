@@ -54,9 +54,8 @@ public:
         return result;
     }
 
-    bool start_capture(const std::string& interface, 
-                       const std::string& filter, 
-                       bool promiscuous) override {
+    bool start_capture(const std::string& interface, const std::string& filter, bool promiscuous) override 
+    {
         if (running) {
             spdlog::warn("[Windows] Captura já está rodando na interface {}.", current_interface);
             return true;
