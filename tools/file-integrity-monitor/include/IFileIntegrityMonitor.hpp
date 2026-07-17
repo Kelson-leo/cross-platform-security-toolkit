@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <memory>
+
 struct FileEntry {
     std::string path;      
     std::string hash_sha256;
