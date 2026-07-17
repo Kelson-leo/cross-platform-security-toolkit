@@ -1,0 +1,8 @@
+[requires]
+openssl/3.0.0
+spdlog/1.14.1
+gtest/1.14.0
+
+[generators]
+CMakeDeps
+CMakeToolchain
