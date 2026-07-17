@@ -161,4 +161,7 @@ This codebase demonstrates:
 
 ## 📝 License
 
-MIT © 2026 [Kellow101](https://github.com/Kelson-leo)
+© [2026] [Kellow101](https://github.com/Kelson-leo). All rights reserved.
+This source code is provided for viewing purposes only. 
+No permission is granted to copy, modify, distribute, or use this code 
+for any purpose without explicit written consent from the author.
