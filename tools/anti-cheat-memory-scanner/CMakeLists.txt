@@ -29,12 +29,20 @@ target_link_libraries(anti_cheat_scanner
 # ------------------------------------------------------------
 # TESTES
 # ------------------------------------------------------------
+
 enable_testing()
 
 add_executable(test_scanner
     tests/test_scanner.cpp
-    src/MemoryScanner.cpp          
+    src/MemoryScanner.cpp
 )
+
+# 🔥 ADICIONE O ARQUIVO DA PLATAFORMA AO TESTE
+if(UNIX)
+    target_sources(test_scanner PRIVATE platform/linux_scanner.cpp)
+elseif(WIN32)
+    target_sources(test_scanner PRIVATE platform/windows_scanner.cpp)
+endif()
 
 target_link_libraries(test_scanner
     GTest::gtest_main
