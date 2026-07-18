@@ -6,10 +6,16 @@
 #include <filesystem>
 #include <thread>
 #include <atomic>
+#include <algorithm>
+#include <mutex>
+#include <map>
 #include <cstring>
+#include <sstream>
+#include <iomanip>
 #include <sys/inotify.h>
 #include <climits>
 #include <unistd.h>
+#include <dirent.h>
 
 namespace fs = std::filesystem;
 
@@ -22,31 +28,196 @@ private:
     std::thread watch_thread;
     AlertCallback callback;
     std::string watch_root;
-    double entropy_threshold = 7.0;
+
+    // --- Heuristics ---
+    static constexpr double ENTROPY_THRESHOLD = 7.0;
+    static constexpr int RATE_THRESHOLD = 20;                // 20 files modified
+    static constexpr int RATE_WINDOW_SECONDS = 5;            // within 5 seconds
+    static constexpr int PROC_CACHE_TTL_SECONDS = 2;         // /proc scan cache TTL
+
+    // Extensions commonly targeted by ransomware.
+    // Used as a severity booster — NOT as a standalone alert trigger.
+    const std::vector<std::string> TARGET_EXTENSIONS = {
+        ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+        ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".bmp",
+        ".txt", ".csv", ".log", ".xml", ".json",
+        ".zip", ".rar", ".7z", ".tar", ".gz",
+        ".mp3", ".mp4", ".avi", ".mkv"
+    };
+
+    // --- Rate-of-modification tracking ---
+    std::vector<std::chrono::steady_clock::time_point> modification_timestamps;
+    std::mutex timestamps_mutex;
+
+    // --- /proc scan cache ---
+    // Maps file_path -> {process_name, pid, cache_time}
+    struct ProcCacheEntry {
+        std::string process_name;
+        int pid;
+        std::chrono::steady_clock::time_point cached_at;
+    };
+    std::map<std::string, ProcCacheEntry> proc_cache;
+    std::mutex proc_cache_mutex;
 
     // ------------------------------------------------------------
-    // Process a single inotify event
+    // Check if the file extension is in the ransomware target list.
+    // ------------------------------------------------------------
+    bool is_target_extension(const std::string& path) {
+        for (const auto& ext : TARGET_EXTENSIONS) {
+            if (path.length() >= ext.length() &&
+                path.compare(path.length() - ext.length(), ext.length(), ext) == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ------------------------------------------------------------
+    // Track modification rate.
+    // Returns true if more than RATE_THRESHOLD files were modified
+    // within the last RATE_WINDOW_SECONDS.
+    // ------------------------------------------------------------
+    bool is_rate_exceeded() {
+        std::lock_guard<std::mutex> lock(timestamps_mutex);
+        auto now = std::chrono::steady_clock::now();
+        auto window = std::chrono::seconds(RATE_WINDOW_SECONDS);
+
+        // Prune timestamps older than the window
+        auto cutoff = now - window;
+        modification_timestamps.erase(
+            std::remove_if(modification_timestamps.begin(), modification_timestamps.end(),
+                           [cutoff](const auto& ts) { return ts < cutoff; }),
+            modification_timestamps.end()
+        );
+
+        // Record current modification
+        modification_timestamps.push_back(now);
+        return modification_timestamps.size() > RATE_THRESHOLD;
+    }
+
+    // ------------------------------------------------------------
+    // Identify which process has a given file open by scanning
+    // /proc/*/fd/*. Includes a short-lived cache to avoid rescanning
+    // on repeated events for the same file path.
+    //
+    // NOTE: In production, use fanotify (FAN_REPORT_TID) for O(1)
+    // PID attribution. This /proc scan is a proof-of-concept.
+    // ------------------------------------------------------------
+    std::string get_process_for_file(const std::string& file_path) {
+        auto now = std::chrono::steady_clock::now();
+
+        // --- Check cache first ---
+        {
+            std::lock_guard<std::mutex> lock(proc_cache_mutex);
+            auto it = proc_cache.find(file_path);
+            if (it != proc_cache.end()) {
+                auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                    now - it->second.cached_at).count();
+                if (age < PROC_CACHE_TTL_SECONDS) {
+                    return it->second.process_name;
+                }
+            }
+        }
+
+        // --- Scan /proc ---
+        DIR* proc_dir = opendir("/proc");
+        if (!proc_dir) return "unknown";
+
+        struct dirent* entry;
+        while ((entry = readdir(proc_dir)) != nullptr) {
+            if (entry->d_type != DT_DIR) continue;
+
+            std::string name = entry->d_name;
+            if (!std::all_of(name.begin(), name.end(), ::isdigit)) continue;
+
+            int pid = std::stoi(name);
+            std::string fd_path = "/proc/" + name + "/fd";
+            DIR* fd_dir = opendir(fd_path.c_str());
+            if (!fd_dir) continue;
+
+            struct dirent* fd_entry;
+            while ((fd_entry = readdir(fd_dir)) != nullptr) {
+                if (fd_entry->d_type != DT_LNK) continue;
+
+                // Read symlink target to get the file path
+                std::string link_path = fd_path + "/" + fd_entry->d_name;
+                char target[PATH_MAX];
+                ssize_t len = readlink(link_path.c_str(), target, sizeof(target) - 1);
+                if (len == -1) continue;
+                target[len] = '\0';
+
+                if (file_path == target) {
+                    // Found the process — get its name from /proc/<pid>/comm
+                    std::string comm_path = "/proc/" + name + "/comm";
+                    std::ifstream comm_file(comm_path);
+                    std::string comm;
+                    if (comm_file.is_open()) {
+                        std::getline(comm_file, comm);
+                    }
+                    closedir(fd_dir);
+                    closedir(proc_dir);
+
+                    std::string result = comm.empty() ? name : comm;
+
+                    // Update cache
+                    {
+                        std::lock_guard<std::mutex> lock(proc_cache_mutex);
+                        proc_cache[file_path] = {result, pid, now};
+                    }
+                    return result;
+                }
+            }
+            closedir(fd_dir);
+        }
+        closedir(proc_dir);
+        return "unknown";
+    }
+
+    // ------------------------------------------------------------
+    // Process a single inotify event.
+    //
+    // Alert logic:
+    //   TRIGGER = high entropy (>7.0) OR rate-of-modification exceeded.
+    //   Target extension acts as a severity BOOSTER (label), not a trigger.
     // ------------------------------------------------------------
     void process_event(const struct inotify_event* event) {
-        // Build the full file path
-        std::string file_path = watch_root + "/" + event->name;
-
-        // Skip directories
         if (event->mask & IN_ISDIR) return;
 
-        // Check for modification or creation events
+        std::string file_path = watch_root + "/" + event->name;
+
         if (event->mask & (IN_MODIFY | IN_CREATE | IN_CLOSE_WRITE)) {
             spdlog::debug("File modified/created: {}", file_path);
 
-            // Calculate entropy of the modified file
+            // --- Gather signals ---
             double entropy = calculate_entropy(file_path);
-            if (entropy > entropy_threshold) {
-                // Trigger alert
+            bool is_high_entropy = entropy > ENTROPY_THRESHOLD;
+            bool rate_exceeded = is_rate_exceeded();
+            bool is_target = is_target_extension(file_path);
+
+            // --- Alert decision: entropy OR rate triggers the alert ---
+            if (is_high_entropy || rate_exceeded) {
                 RansomwareAlert alert;
                 alert.timestamp = std::chrono::system_clock::now();
-                alert.process_name = "unknown"; // TODO: obtain via /proc or fanotify
-                alert.pid = 0;
-                alert.description = "High entropy file detected!";
+
+                // Attribute process via /proc scan
+                alert.process_name = get_process_for_file(file_path);
+                alert.pid = 0; // /proc scan returns name but PID is cached internally
+
+                // Build detailed description
+                std::stringstream desc;
+                desc << "Suspicious activity detected!";
+                if (is_high_entropy) {
+                    desc << " [High entropy: " << std::fixed
+                         << std::setprecision(2) << entropy << "]";
+                }
+                if (rate_exceeded) {
+                    desc << " [High modification rate: >" << RATE_THRESHOLD
+                         << " files in " << RATE_WINDOW_SECONDS << "s]";
+                }
+                if (is_target) {
+                    desc << " [Target extension]";
+                }
+                alert.description = desc.str();
 
                 SuspiciousFile sus;
                 sus.path = file_path;
@@ -61,19 +232,13 @@ private:
     }
 
 public:
-    // ------------------------------------------------------------
-    // Destructor: ensure watcher is stopped
-    // ------------------------------------------------------------
     ~LinuxRansomwareDetector() {
         stop_watch();
     }
 
     // ------------------------------------------------------------
     // 1. Shannon entropy calculation
-    //
-    // H = -Σ p(x) * log2(p(x))
-    //
-    // A value near 8.0 indicates compressed/encrypted data.
+    //    H = -Σ p(x) * log2(p(x))
     // ------------------------------------------------------------
     double calculate_entropy(const std::string& file_path) override {
         std::ifstream file(file_path, std::ios::binary);
@@ -82,7 +247,6 @@ public:
             return 0.0;
         }
 
-        // Count frequency of each byte (0-255)
         const int BYTE_RANGE = 256;
         std::vector<size_t> freq(BYTE_RANGE, 0);
         size_t total_bytes = 0;
@@ -102,7 +266,6 @@ public:
 
         if (total_bytes == 0) return 0.0;
 
-        // Compute entropy
         double entropy = 0.0;
         for (int i = 0; i < BYTE_RANGE; ++i) {
             if (freq[i] == 0) continue;
@@ -113,9 +276,7 @@ public:
     }
 
     // ------------------------------------------------------------
-    // 2. Directory scanning — recursively iterates a directory,
-    //    computes entropy for each file, and returns those above
-    //    the threshold.
+    // 2. Directory scanning
     // ------------------------------------------------------------
     std::vector<SuspiciousFile> scan_directory(const std::string& root_directory) override {
         std::vector<SuspiciousFile> suspicious;
@@ -154,14 +315,12 @@ public:
         callback = cb;
         watch_root = root_directory;
 
-        // Initialize inotify
         inotify_fd = inotify_init1(IN_NONBLOCK);
         if (inotify_fd == -1) {
             spdlog::error("Failed to initialize inotify.");
             return false;
         }
 
-        // Add watch on the root directory
         watch_descriptor = inotify_add_watch(inotify_fd, root_directory.c_str(),
                                              IN_MODIFY | IN_CREATE | IN_CLOSE_WRITE);
         if (watch_descriptor == -1) {
@@ -171,7 +330,6 @@ public:
             return false;
         }
 
-        // Start background watcher thread
         watching = true;
         watch_thread = std::thread([this]() {
             const size_t EVENT_SIZE = sizeof(struct inotify_event) + NAME_MAX + 1;

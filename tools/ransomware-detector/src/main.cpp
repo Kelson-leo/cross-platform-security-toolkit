@@ -23,7 +23,7 @@ void on_alert(const RansomwareAlert& alert) {
     for (const auto& file : alert.suspicious_files) {
         std::cout << "  - " << file.path << " (entropy: " << file.entropy << ")\n";
     }
-    std::cout << "================================\n\n";
+    std::cout << "================================\n" << std::endl;
 }
 
 void print_usage(const char* prog_name) {
