@@ -297,14 +297,17 @@ public:
         if (!running) return;
         running = false;
 
-        // Wait for capture thread to exit naturally (checks running flag every 100ms via timeout)
-        if (capture_thread.joinable()) {
-            capture_thread.join();
-        }
-
+        // Close pcap first — forces any blocked pcap_dispatch to return.
+        // This is safe on Linux: pcap_close() closes the underlying fd,
+        // which causes poll() inside pcap_dispatch to wake up immediately.
         if (pcap_handle) {
             pcap_close(pcap_handle);
             pcap_handle = nullptr;
+        }
+
+        // Thread exits cleanly within milliseconds since pcap is closed
+        if (capture_thread.joinable()) {
+            capture_thread.join();
         }
 
         // Finalize remaining flows
