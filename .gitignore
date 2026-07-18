@@ -9,6 +9,7 @@ conan_toolchain.cmake
 conandeps_legacy.cmake
 cmakedeps_macros.cmake
 CMakePresets.json
+CMakeUserPresets.json
 *.cmake
 !CMakeLists.txt
 
