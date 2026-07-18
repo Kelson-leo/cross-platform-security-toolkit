@@ -37,7 +37,6 @@ add_executable(test_scanner
     src/MemoryScanner.cpp
 )
 
-# 🔥 ADICIONE O ARQUIVO DA PLATAFORMA AO TESTE
 if(UNIX)
     target_sources(test_scanner PRIVATE platform/linux_scanner.cpp)
 elseif(WIN32)

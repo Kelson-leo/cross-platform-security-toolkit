@@ -28,6 +28,7 @@ struct ScanReport {
     bool text_section_integrity_ok;   
     std::vector<std::string> injected_regions; 
     std::vector<std::string> hooks_detected;   
+    bool has_rwx_regions = false;
 };
 
 // Pure interface

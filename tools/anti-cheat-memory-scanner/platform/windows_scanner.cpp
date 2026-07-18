@@ -17,7 +17,7 @@
 #pragma comment(lib, "advapi32.lib")
 
 // ------------------------------------------------------------
-// Estrutura para armazenar info da seção .text do PE
+// Structure to store PE .text section info
 // ------------------------------------------------------------
 struct PESectionInfo {
     std::vector<unsigned char> data;
@@ -28,7 +28,7 @@ struct PESectionInfo {
 class WindowsMemoryScanner : public IMemoryScanner {
 private:
     // ------------------------------------------------------------
-    // 1. SHA-256 de um buffer
+    // 1. SHA-256 of a buffer
     // ------------------------------------------------------------
     std::string sha256_buffer(const unsigned char* data, size_t len) {
         EVP_MD_CTX* ctx = EVP_MD_CTX_new();
@@ -60,13 +60,13 @@ private:
     }
 
     // ------------------------------------------------------------
-    // 2. Ler arquivo inteiro para vector<unsigned char>
+    // 2. Read entire file into vector<unsigned char>
     // ------------------------------------------------------------
     std::vector<unsigned char> read_whole_file(const std::string& path) {
         HANDLE hFile = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hFile == INVALID_HANDLE_VALUE) {
-            spdlog::error("Não foi possível abrir arquivo: {}", path);
+            spdlog::error("Could not open file: {}", path);
             return {};
         }
 
@@ -74,7 +74,7 @@ private:
         std::vector<unsigned char> buffer(fileSize);
         DWORD bytesRead;
         if (!ReadFile(hFile, buffer.data(), fileSize, &bytesRead, nullptr) || bytesRead != fileSize) {
-            spdlog::error("Erro ao ler arquivo: {}", path);
+            spdlog::error("Error reading file: {}", path);
             CloseHandle(hFile);
             return {};
         }
@@ -84,7 +84,7 @@ private:
     }
 
     // ------------------------------------------------------------
-    // 3. Obter caminho do executável de um processo (Win32 API)
+    // 3. Get process executable path (Win32 API)
     // ------------------------------------------------------------
     std::string get_process_exe_path(HANDLE hProcess) {
         char path[MAX_PATH];
@@ -96,13 +96,12 @@ private:
     }
 
     // ------------------------------------------------------------
-    // 4. Obter nome do processo
+    // 4. Get process name
     // ------------------------------------------------------------
     std::string get_process_name(HANDLE hProcess) {
         char name[MAX_PATH];
         DWORD size = sizeof(name);
         if (QueryFullProcessImageNameA(hProcess, 0, name, &size)) {
-            // Extrai apenas o nome do arquivo (remove caminho)
             std::string fullPath(name);
             size_t pos = fullPath.find_last_of("\\");
             if (pos != std::string::npos) {
@@ -114,7 +113,7 @@ private:
     }
 
     // ------------------------------------------------------------
-    // 5. Extrair a seção .text do PE (disco)
+    // 5. Extract .text section from PE (disk)
     // ------------------------------------------------------------
     PESectionInfo extract_text_section_from_pe(const std::vector<unsigned char>& fileContent) {
         PESectionInfo result;
@@ -123,28 +122,24 @@ private:
 
         if (fileContent.size() < sizeof(IMAGE_DOS_HEADER)) return result;
 
-        // DOS Header
         const IMAGE_DOS_HEADER* dosHeader = reinterpret_cast<const IMAGE_DOS_HEADER*>(fileContent.data());
         if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
-            spdlog::error("Arquivo não é PE (DOS header inválido)");
+            spdlog::error("File is not PE (invalid DOS header)");
             return result;
         }
 
-        // NT Headers
         const IMAGE_NT_HEADERS* ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS*>(
             fileContent.data() + dosHeader->e_lfanew);
         if (ntHeaders->Signature != IMAGE_NT_SIGNATURE) {
-            spdlog::error("Assinatura PE inválida");
+            spdlog::error("Invalid PE signature");
             return result;
         }
 
-        // Section Table
         const IMAGE_SECTION_HEADER* sectionHeader = IMAGE_FIRST_SECTION(ntHeaders);
         int numSections = ntHeaders->FileHeader.NumberOfSections;
 
         for (int i = 0; i < numSections; ++i) {
             const IMAGE_SECTION_HEADER* section = &sectionHeader[i];
-            // Nome da seção (8 bytes, não terminado em null se tiver 8 caracteres)
             char sectionName[9] = {0};
             memcpy(sectionName, section->Name, 8);
 
@@ -153,37 +148,36 @@ private:
                 result.size = section->SizeOfRawData;
                 result.data.assign(fileContent.begin() + section->PointerToRawData,
                                    fileContent.begin() + section->PointerToRawData + section->SizeOfRawData);
-                spdlog::debug("Seção .text encontrada: vaddr=0x{:x}, size={}", result.vaddr, result.size);
+                spdlog::debug(".text section found: vaddr=0x{:x}, size={}", result.vaddr, result.size);
                 return result;
             }
         }
 
-        spdlog::error("Seção .text não encontrada no PE");
+        spdlog::error(".text section not found in PE");
         return result;
     }
 
     // ------------------------------------------------------------
-    // 6. Ler memória do processo (ReadProcessMemory)
+    // 6. Read process memory (ReadProcessMemory)
     // ------------------------------------------------------------
     std::vector<unsigned char> read_process_memory(HANDLE hProcess, uintptr_t address, size_t size) {
         std::vector<unsigned char> buffer(size);
         SIZE_T bytesRead;
         if (!ReadProcessMemory(hProcess, reinterpret_cast<LPCVOID>(address),
                                buffer.data(), size, &bytesRead) || bytesRead != size) {
-            spdlog::error("Falha ao ler memória do processo (endereço: 0x{:x}, tamanho: {})", address, size);
+            spdlog::error("Failed to read process memory (address: 0x{:x}, size: {})", address, size);
             return {};
         }
         return buffer;
     }
 
     // ------------------------------------------------------------
-    // 7. Obter a imagem base do módulo principal do processo
+    // 7. Get base image of the process main module
     // ------------------------------------------------------------
     uintptr_t get_process_image_base(HANDLE hProcess) {
         HMODULE hMods[1024];
         DWORD cbNeeded;
         if (EnumProcessModules(hProcess, hMods, sizeof(hMods), &cbNeeded)) {
-            // O primeiro módulo é o executável principal
             MODULEINFO modInfo;
             if (GetModuleInformation(hProcess, hMods[0], &modInfo, sizeof(modInfo))) {
                 return reinterpret_cast<uintptr_t>(modInfo.lpBaseOfDll);
@@ -192,15 +186,41 @@ private:
         return 0;
     }
 
+    // ------------------------------------------------------------
+    // 🔥 8. RWX region detection (FIXED)
+    // ------------------------------------------------------------
+    std::vector<MemoryRegion> get_rwx_regions(HANDLE hProcess) {
+        std::vector<MemoryRegion> rwx_regions;
+        uintptr_t address = 0;
+        MEMORY_BASIC_INFORMATION mbi;
+
+        while (VirtualQueryEx(hProcess, reinterpret_cast<LPCVOID>(address),
+                              &mbi, sizeof(mbi)) == sizeof(mbi)) {
+            DWORD protect = mbi.Protect;
+            if ((protect & PAGE_EXECUTE_READWRITE) == PAGE_EXECUTE_READWRITE ||
+                (protect & PAGE_EXECUTE_WRITECOPY) == PAGE_EXECUTE_WRITECOPY) {
+                MemoryRegion region;
+                region.start_address = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+                region.end_address = region.start_address + mbi.RegionSize;
+                region.size = mbi.RegionSize;
+                region.permissions = "RWX";  // Direct, since we only enter here for RWX
+                region.path = "";
+                rwx_regions.push_back(region);
+            }
+            address = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+        }
+        return rwx_regions;
+    }
+
 public:
     // ------------------------------------------------------------
-    // 8. list_processes(): lista todos os processos
+    // 9. list_processes()
     // ------------------------------------------------------------
     std::vector<ProcessInfo> list_processes() override {
         std::vector<ProcessInfo> result;
         HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if (snapshot == INVALID_HANDLE_VALUE) {
-            spdlog::error("Falha ao criar snapshot de processos");
+            spdlog::error("Failed to create process snapshot");
             return result;
         }
 
@@ -226,44 +246,41 @@ public:
         } while (Process32Next(snapshot, &entry));
 
         CloseHandle(snapshot);
-        spdlog::info("Encontrados {} processos", result.size());
+        spdlog::info("Found {} processes", result.size());
         return result;
     }
 
     // ------------------------------------------------------------
-    // 9. scan_process(): escaneia um processo específico
+    // 10. scan_process()
     // ------------------------------------------------------------
     ScanReport scan_process(int pid) override {
         ScanReport report;
         report.pid = pid;
         report.text_section_integrity_ok = false;
 
-        // Abre o processo
         HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
                                       FALSE, pid);
         if (!hProcess) {
-            spdlog::error("Não foi possível abrir o processo PID {}", pid);
+            spdlog::error("Could not open process PID {}", pid);
             report.process_name = "unknown";
             return report;
         }
 
         report.process_name = get_process_name(hProcess);
 
-        // Obtém a imagem base do módulo principal
         uintptr_t imageBase = get_process_image_base(hProcess);
         if (imageBase == 0) {
-            spdlog::error("Não foi possível obter imagem base para PID {}", pid);
+            spdlog::error("Could not get base image for PID {}", pid);
             CloseHandle(hProcess);
             return report;
         }
 
-        // Lê os cabeçalhos PE da memória
         IMAGE_DOS_HEADER dosHeader;
         IMAGE_NT_HEADERS ntHeaders;
         if (!ReadProcessMemory(hProcess, reinterpret_cast<LPCVOID>(imageBase),
                                &dosHeader, sizeof(dosHeader), nullptr) ||
             dosHeader.e_magic != IMAGE_DOS_SIGNATURE) {
-            spdlog::error("Erro ao ler DOS header da memória para PID {}", pid);
+            spdlog::error("Error reading DOS header from memory for PID {}", pid);
             CloseHandle(hProcess);
             return report;
         }
@@ -272,15 +289,14 @@ public:
                                reinterpret_cast<LPCVOID>(imageBase + dosHeader.e_lfanew),
                                &ntHeaders, sizeof(ntHeaders), nullptr) ||
             ntHeaders.Signature != IMAGE_NT_SIGNATURE) {
-            spdlog::error("Erro ao ler NT headers da memória para PID {}", pid);
+            spdlog::error("Error reading NT headers from memory for PID {}", pid);
             CloseHandle(hProcess);
             return report;
         }
 
-        // Extrai a seção .text do disco
         std::string exePath = get_process_exe_path(hProcess);
         if (exePath.empty()) {
-            spdlog::error("Não foi possível obter caminho do executável para PID {}", pid);
+            spdlog::error("Could not get executable path for PID {}", pid);
             CloseHandle(hProcess);
             return report;
         }
@@ -293,36 +309,45 @@ public:
 
         PESectionInfo textDisk = extract_text_section_from_pe(fileContent);
         if (textDisk.data.empty() || textDisk.vaddr == 0) {
-            spdlog::error("Não foi possível extrair .text do disco para {}", exePath);
+            spdlog::error("Could not extract .text from disk for {}", exePath);
             CloseHandle(hProcess);
             return report;
         }
 
-        spdlog::info("Seção .text no disco: vaddr=0x{:x}, size={}", textDisk.vaddr, textDisk.size);
+        spdlog::info(".text section on disk: vaddr=0x{:x}, size={}", textDisk.vaddr, textDisk.size);
 
-        // Lê a seção .text da memória (usando a imagem base + vaddr)
         uintptr_t textAddr = imageBase + textDisk.vaddr;
         auto textMem = read_process_memory(hProcess, textAddr, textDisk.size);
         if (textMem.empty() || textMem.size() != textDisk.size) {
-            spdlog::error("Não foi possível ler .text da memória para PID {}", pid);
+            spdlog::error("Could not read .text from memory for PID {}", pid);
             CloseHandle(hProcess);
             return report;
         }
 
-        // Calcula hashes
         std::string hashDisk = sha256_buffer(textDisk.data.data(), textDisk.data.size());
         std::string hashMem = sha256_buffer(textMem.data(), textMem.size());
 
-        spdlog::info("Hash .text (disco): {}", hashDisk);
-        spdlog::info("Hash .text (memória): {}", hashMem);
+        spdlog::info("Hash .text (disk): {}", hashDisk);
+        spdlog::info("Hash .text (memory): {}", hashMem);
 
         if (hashDisk == hashMem) {
             report.text_section_integrity_ok = true;
-            spdlog::info("✅ Seção .text íntegra para PID {}", pid);
+            spdlog::info("✅ .text section intact for PID {}", pid);
         } else {
             report.text_section_integrity_ok = false;
-            spdlog::warn("🚨 Seção .text comprometida para PID {}!", pid);
-            report.injected_regions.push_back("Seção .text modificada");
+            spdlog::warn("🚨 .text section compromised for PID {}!", pid);
+            report.injected_regions.push_back("Modified .text section");
+        }
+
+        auto rwx_regions = get_rwx_regions(hProcess);
+        if (!rwx_regions.empty()) {
+            spdlog::warn("🚨 Found {} RWX regions in process PID {}", pid, rwx_regions.size());
+            for (const auto& region : rwx_regions) {
+                std::stringstream ss;
+                ss << "RWX Region: 0x" << std::hex << region.start_address
+                   << " - 0x" << region.end_address;
+                report.injected_regions.push_back(ss.str());
+            }
         }
 
         CloseHandle(hProcess);
@@ -330,12 +355,12 @@ public:
     }
 
     // ------------------------------------------------------------
-    // 10. verify_text_section_integrity
+    // 11. verify_text_section_integrity
     // ------------------------------------------------------------
     bool verify_text_section_integrity(int pid, std::string& out_error) override {
         auto report = scan_process(pid);
         if (report.pid == 0) {
-            out_error = "Falha ao escanear processo";
+            out_error = "Failed to scan process";
             return false;
         }
         return report.text_section_integrity_ok;
@@ -343,9 +368,9 @@ public:
 };
 
 // ------------------------------------------------------------
-// 11. Factory function
+// 12. Factory function
 // ------------------------------------------------------------
 std::unique_ptr<IMemoryScanner> create_memory_scanner() {
-    spdlog::info("🛠️ Criando Memory Scanner para Windows");
+    spdlog::info("🛠️ Creating Memory Scanner for Windows");
     return std::make_unique<WindowsMemoryScanner>();
 }

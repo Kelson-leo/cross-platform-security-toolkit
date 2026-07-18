@@ -16,13 +16,11 @@
 #include <iomanip>    
 #include <algorithm>  
 
-namespace fs = std::filesystem;
-
 struct ElfSectionInfo {
     std::vector<unsigned char> data;
     size_t offset;
     size_t size;
-    uintptr_t vaddr;  // <--- ADICIONADO: endereço virtual da seção
+    uintptr_t vaddr;  // <--- ADDED: virtual address of the section
 };
 
 class LinuxMemoryScanner : public IMemoryScanner {
@@ -65,7 +63,7 @@ private:
     std::vector<unsigned char> read_whole_file(const std::string& path) {
         std::ifstream file(path, std::ios::binary | std::ios::ate);
         if (!file.is_open()) {
-            spdlog::error("Não foi possível abrir arquivo: {}", path);
+            spdlog::error("Could not open file: {}", path);
             return {};
         }
         size_t size = file.tellg();
@@ -83,7 +81,7 @@ private:
         char path[PATH_MAX];
         ssize_t len = readlink(link_path.c_str(), path, sizeof(path) - 1);
         if (len == -1) {
-            spdlog::error("Falha ao ler link simbólico para PID {}", pid);
+            spdlog::error("Failed to read symbolic link for PID {}", pid);
             return "";
         }
         path[len] = '\0';
@@ -105,14 +103,14 @@ private:
     }
 
     // ------------------------------------------------------------
-    // 5. (Opcional) Obter a região .text do maps (não mais usado)
-    // Mantido apenas para referencia, mas não usado na comparação.
+    // 5. (Optional) Get .text region from maps (no longer used)
+    // Kept for reference only, not used in comparison.
     // ------------------------------------------------------------
-    bool get_text_region(int pid, uintptr_t& start, uintptr_t& end, size_t& size) {
+    /*bool get_text_region(int pid, uintptr_t& start, uintptr_t& end, size_t& size) {
         std::string maps_path = "/proc/" + std::to_string(pid) + "/maps";
         std::ifstream maps_file(maps_path);
         if (!maps_file.is_open()) {
-            spdlog::error("Não foi possível abrir /proc/{}/maps", pid);
+            spdlog::error("Could not open /proc/{}/maps", pid);
             return false;
         }
 
@@ -135,67 +133,101 @@ private:
                 start = std::stoull(start_str, nullptr, 16);
                 end = std::stoull(end_str, nullptr, 16);
                 size = end - start;
-                spdlog::debug("Região .text encontrada: 0x{:x} - 0x{:x} ({} bytes)", start, end, size);
+                spdlog::debug(".text region found: 0x{:x} - 0x{:x} ({} bytes)", start, end, size);
                 return true;
             }
         }
         return false;
+    }*/
+
+    std::vector<MemoryRegion> get_rwx_regions(int pid) {
+    std::vector<MemoryRegion> rwx_regions;
+    std::string maps_path = "/proc/" + std::to_string(pid) + "/maps";
+    std::ifstream maps_file(maps_path);
+    if (!maps_file.is_open()) {
+        spdlog::error("Could not open /proc/{}/maps", pid);
+        return rwx_regions;
     }
+
+    std::string line;
+    while (std::getline(maps_file, line)) {
+        std::istringstream iss(line);
+        std::string addr_range, perms, offset, dev, inode, path;
+        iss >> addr_range >> perms >> offset >> dev >> inode >> path;
+
+        // Check if permissions include 'w' (write) and 'x' (execute)
+        if (perms.find('w') != std::string::npos && perms.find('x') != std::string::npos) {
+            size_t dash_pos = addr_range.find('-');
+            if (dash_pos == std::string::npos) continue;
+            uintptr_t start = std::stoull(addr_range.substr(0, dash_pos), nullptr, 16);
+            uintptr_t end = std::stoull(addr_range.substr(dash_pos + 1), nullptr, 16);
+
+            MemoryRegion region;
+            region.start_address = start;
+            region.end_address = end;
+            region.size = end - start;
+            region.permissions = perms;
+            region.path = path;
+            rwx_regions.push_back(region);
+        }
+    }
+    return rwx_regions;
+}
 
     // ------------------------------------------------------------
     // 6. Extracts .text section from ELF file (disk) and returns struct
-    //    Agora com vaddr
+    //    Now with vaddr
     // ------------------------------------------------------------
     ElfSectionInfo extract_text_section_from_file(const std::string& exe_path) {
         ElfSectionInfo result;
-        result.vaddr = 0; // inicializa
+        result.vaddr = 0; // initialize
         auto file_content = read_whole_file(exe_path);
         if (file_content.empty()) {
-            spdlog::error("Não foi possível ler o arquivo {}", exe_path);
+            spdlog::error("Could not read file {}", exe_path);
             return result;
         }
 
-        // Verifica se é ELF
+        // Check if it's ELF
         if (file_content.size() < 4 ||
             file_content[0] != 0x7F || file_content[1] != 'E' ||
             file_content[2] != 'L' || file_content[3] != 'F') {
-            spdlog::error("Arquivo {} não é ELF válido", exe_path);
+            spdlog::error("File {} is not a valid ELF", exe_path);
             return result;
         }
 
-        // Verifica se é 64 bits (EI_CLASS)
+        // Check if 64-bit (EI_CLASS)
         if (file_content[4] != ELFCLASS64) {
-            spdlog::error("Apenas ELF64 suportado por enquanto");
+            spdlog::error("Only ELF64 supported for now");
             return result;
         }
 
-        // Cabeçalho ELF64
+        // ELF64 header
         Elf64_Ehdr* ehdr = reinterpret_cast<Elf64_Ehdr*>(file_content.data());
         
-        // Tabela de seções
+        // Section header table
         Elf64_Shdr* shdr_table = reinterpret_cast<Elf64_Shdr*>(file_content.data() + ehdr->e_shoff);
         
-        // Tabela de strings (nomes das seções)
+        // String table (section names)
         Elf64_Shdr* strtab_hdr = &shdr_table[ehdr->e_shstrndx];
         const char* strtab = reinterpret_cast<const char*>(file_content.data() + strtab_hdr->sh_offset);
 
-        // Procura pela seção .text
+        // Look for .text section
         for (int i = 0; i < ehdr->e_shnum; ++i) {
             Elf64_Shdr* section = &shdr_table[i];
             const char* section_name = strtab + section->sh_name;
             if (std::strcmp(section_name, ".text") == 0) {
                 result.offset = section->sh_offset;
                 result.size = section->sh_size;
-                result.vaddr = section->sh_addr;  // <--- guarda o endereço virtual
+                result.vaddr = section->sh_addr;  // <--- store virtual address
                 result.data.assign(file_content.begin() + result.offset,
                                    file_content.begin() + result.offset + result.size);
-                spdlog::debug("Seção .text extraída do disco: offset={}, size={}, vaddr=0x{:x}", 
+                spdlog::debug(".text section extracted from disk: offset={}, size={}, vaddr=0x{:x}", 
                               result.offset, result.size, result.vaddr);
                 return result;
             }
         }
 
-        spdlog::error("Seção .text não encontrada no ELF");
+        spdlog::error(".text section not found in ELF");
         return result;
     }
 
@@ -206,7 +238,7 @@ private:
         std::string mem_path = "/proc/" + std::to_string(pid) + "/mem";
         int mem_fd = open(mem_path.c_str(), O_RDONLY);
         if (mem_fd == -1) {
-            spdlog::error("Não foi possível abrir /proc/{}/mem (precisa de sudo?)", pid);
+            spdlog::error("Could not open /proc/{}/mem (need sudo?)", pid);
             return {};
         }
 
@@ -215,7 +247,7 @@ private:
         close(mem_fd);
 
         if (bytes_read != static_cast<ssize_t>(size)) {
-            spdlog::error("Falha ao ler memória do processo {}: leu {} bytes, esperava {}", pid, bytes_read, size);
+            spdlog::error("Failed to read process {} memory: read {} bytes, expected {}", pid, bytes_read, size);
             return {};
         }
 
@@ -230,7 +262,7 @@ public:
         std::vector<ProcessInfo> result;
         DIR* proc_dir = opendir("/proc");
         if (!proc_dir) {
-            spdlog::error("Não foi possível abrir /proc");
+            spdlog::error("Could not open /proc");
             return result;
         }
 
@@ -250,7 +282,7 @@ public:
             }
         }
         closedir(proc_dir);
-        spdlog::info("Encontrados {} processos", result.size());
+        spdlog::info("Found {} processes", result.size());
         return result;
     }
 
@@ -265,44 +297,55 @@ public:
         std::string exe_path = get_process_exe_path(pid);
         if (exe_path.empty()) {
             report.process_name = get_process_name(pid);
-            spdlog::error("Não foi possível obter caminho do executável para PID {}", pid);
+            spdlog::error("Could not get executable path for PID {}", pid);
             return report;
         }
         report.process_name = get_process_name(pid);
 
-        // Extrai a seção .text do arquivo no disco (com offset, size e vaddr)
+        // Extract .text section from file on disk (with offset, size and vaddr)
         ElfSectionInfo text_disk_info = extract_text_section_from_file(exe_path);
         if (text_disk_info.data.empty()) {
-            spdlog::error("Não foi possível extrair .text do disco para {}", exe_path);
+            spdlog::error("Could not extract .text from disk for {}", exe_path);
             return report;
         }
 
-        spdlog::info("Seção .text no disco: offset={}, size={}, vaddr=0x{:x}", 
+        spdlog::info(".text section on disk: offset={}, size={}, vaddr=0x{:x}", 
                      text_disk_info.offset, text_disk_info.size, text_disk_info.vaddr);
 
-        // Lê a seção .text da memória usando o endereço virtual (vaddr)
-        // Isso é mais preciso do que usar a região inteira do maps.
+        // Read .text section from memory using virtual address (vaddr)
+        // This is more precise than using the entire maps region.
         auto text_mem = read_process_memory(pid, text_disk_info.vaddr, text_disk_info.size);
         if (text_mem.empty() || text_mem.size() != text_disk_info.size) {
-            spdlog::error("Não foi possível ler .text da memória para PID {}", pid);
+            spdlog::error("Could not read .text from memory for PID {}", pid);
             return report;
         }
 
-        // Calcula os hashes
+        // Compute hashes
         std::string hash_disk = sha256_buffer(text_disk_info.data.data(), text_disk_info.data.size());
         std::string hash_mem = sha256_buffer(text_mem.data(), text_mem.size());
 
-        spdlog::info("Hash .text (disco): {}", hash_disk);
-        spdlog::info("Hash .text (memória): {}", hash_mem);
+        spdlog::info("Hash .text (disk): {}", hash_disk);
+        spdlog::info("Hash .text (memory): {}", hash_mem);
 
-        // Compara
+        // Compare
         if (hash_disk == hash_mem) {
             report.text_section_integrity_ok = true;
-            spdlog::info("✅ Seção .text íntegra para PID {}", pid);
+            spdlog::info("✅ .text section intact for PID {}", pid);
         } else {
             report.text_section_integrity_ok = false;
-            spdlog::warn("🚨 Seção .text comprometida para PID {}!", pid);
-            report.injected_regions.push_back("Seção .text modificada");
+            spdlog::warn("🚨 .text section compromised for PID {}!", pid);
+            report.injected_regions.push_back("Modified .text section");
+        }
+
+        auto rwx_regions = get_rwx_regions(pid);
+        if (!rwx_regions.empty()) {
+            spdlog::warn("🚨 Found {} RWX regions in process PID {}", rwx_regions.size(), pid);
+            for (const auto& region : rwx_regions) {
+                std::stringstream ss;
+                ss << "RWX Region: 0x" << std::hex << region.start_address
+                   << " - 0x" << region.end_address << " (" << region.permissions << ")";
+                report.injected_regions.push_back(ss.str());
+            }
         }
 
         return report;
@@ -314,7 +357,7 @@ public:
     bool verify_text_section_integrity(int pid, std::string& out_error) override {
         auto report = scan_process(pid);
         if (report.pid == 0) {
-            out_error = "Falha ao escanear processo";
+            out_error = "Failed to scan process";
             return false;
         }
         return report.text_section_integrity_ok;
@@ -325,6 +368,6 @@ public:
 // 11. Factory function
 // ------------------------------------------------------------
 std::unique_ptr<IMemoryScanner> create_memory_scanner() {
-    spdlog::info("🛠️ Criando Memory Scanner para Linux");
+    spdlog::info("🛠️ Creating Memory Scanner for Linux");
     return std::make_unique<LinuxMemoryScanner>();
 }
