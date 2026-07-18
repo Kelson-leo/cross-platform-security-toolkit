@@ -25,6 +25,18 @@ struct PESectionInfo {
     size_t size;
 };
 
+// Critical functions to check for hooks (kernel32.dll / ntdll.dll)
+std::vector<std::string> critical_functions = {
+    "ReadProcessMemory", "WriteProcessMemory", "CreateRemoteThread",
+    "VirtualAllocEx", "NtCreateFile", "NtWriteFile"
+};
+
+// Signature list (example: x64/x86 shellcode patterns)
+std::vector<std::string> signatures = {
+    "48 31 C0 50 48 BB 2F 62 69 6E 2F 2F 73 68 53 48 89 E7 50 48 89 E2 57 48 89 E6 B0 3B 0F 05", // shellcode /bin/sh
+    "31 C0 50 68 2F 2F 73 68 68 2F 62 69 6E 89 E3 50 53 89 E1 B0 0B CD 80"                      // shellcode x86
+};
+
 class WindowsMemoryScanner : public IMemoryScanner {
 private:
     // ------------------------------------------------------------
@@ -187,7 +199,7 @@ private:
     }
 
     // ------------------------------------------------------------
-    // 🔥 8. RWX region detection (FIXED)
+    // 8. RWX region detection
     // ------------------------------------------------------------
     std::vector<MemoryRegion> get_rwx_regions(HANDLE hProcess) {
         std::vector<MemoryRegion> rwx_regions;
@@ -212,9 +224,106 @@ private:
         return rwx_regions;
     }
 
+    // ------------------------------------------------------------
+    // 9. NEW: Scan API hooks in the target process
+    //
+    // System DLLs (kernel32, ntdll) are loaded at the same base
+    // address across processes, so we resolve function addresses in
+    // our own process and read the target process memory at those
+    // addresses to check for inline hooks (E9/E8/E9 first byte).
+    // ------------------------------------------------------------
+    std::vector<std::string> scan_api_hooks(HANDLE hProcess) {
+        std::vector<std::string> hooks;
+
+        HMODULE hKernel = GetModuleHandleA("kernel32.dll");
+        HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
+
+        for (const auto& func_name : critical_functions) {
+            // Try kernel32 first, then ntdll
+            FARPROC func_ptr = nullptr;
+            if (hKernel) func_ptr = GetProcAddress(hKernel, func_name.c_str());
+            if (!func_ptr && hNtdll) func_ptr = GetProcAddress(hNtdll, func_name.c_str());
+            if (!func_ptr) continue;
+
+            // Read first 16 bytes of the function from the target process
+            unsigned char buffer[16];
+            SIZE_T bytesRead;
+            if (ReadProcessMemory(hProcess, func_ptr, buffer, 16, &bytesRead) && bytesRead == 16) {
+                // Check for inline hook: JMP rel32 (0xE9) or JMP short (0xEB)
+                if (buffer[0] == 0xE9 || buffer[0] == 0xEB) {
+                    std::stringstream ss;
+                    ss << "Possible inline hook in " << func_name
+                       << " (first byte 0x" << std::hex << static_cast<int>(buffer[0]) << ")";
+                    hooks.push_back(ss.str());
+                }
+            }
+        }
+        return hooks;
+    }
+
+    // ------------------------------------------------------------
+    // 10. NEW: Scan memory regions for byte signatures
+    //
+    // Enumerates committed executable regions via VirtualQueryEx
+    // and searches each for known shellcode/malware signatures.
+    // ------------------------------------------------------------
+    std::vector<std::string> scan_signatures(HANDLE hProcess) {
+        std::vector<std::string> found;
+        uintptr_t address = 0;
+        MEMORY_BASIC_INFORMATION mbi;
+
+        while (VirtualQueryEx(hProcess, reinterpret_cast<LPCVOID>(address),
+                              &mbi, sizeof(mbi)) == sizeof(mbi)) {
+            // Only scan committed regions with execute permission
+            if (mbi.State == MEM_COMMIT &&
+                (mbi.Protect & PAGE_EXECUTE) ||
+                (mbi.Protect & PAGE_EXECUTE_READ) ||
+                (mbi.Protect & PAGE_EXECUTE_READWRITE) ||
+                (mbi.Protect & PAGE_EXECUTE_WRITECOPY)) {
+
+                // Read the entire region
+                std::vector<unsigned char> buffer(mbi.RegionSize);
+                SIZE_T bytesRead;
+                if (ReadProcessMemory(hProcess, mbi.BaseAddress, buffer.data(),
+                                     mbi.RegionSize, &bytesRead) && bytesRead > 0) {
+                    buffer.resize(bytesRead);
+
+                    // For each signature, check if present in the region
+                    for (const auto& sig_hex : signatures) {
+                        // Convert hex signature to bytes
+                        std::vector<unsigned char> sig_bytes;
+                        std::istringstream hex_stream(sig_hex);
+                        std::string byte_str;
+                        while (hex_stream >> byte_str) {
+                            sig_bytes.push_back(
+                                static_cast<unsigned char>(std::stoi(byte_str, nullptr, 16)));
+                        }
+                        if (sig_bytes.empty()) continue;
+
+                        // Search for signature in region
+                        auto it = std::search(buffer.begin(), buffer.end(),
+                                              sig_bytes.begin(), sig_bytes.end());
+                        if (it != buffer.end()) {
+                            size_t offset = std::distance(buffer.begin(), it);
+                            uintptr_t match_addr = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + offset;
+                            std::stringstream ss;
+                            ss << "Signature found at 0x" << std::hex << match_addr
+                               << " (region: 0x" << reinterpret_cast<uintptr_t>(mbi.BaseAddress)
+                               << " - 0x" << (reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize)
+                               << ")";
+                            found.push_back(ss.str());
+                        }
+                    }
+                }
+            }
+            address = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+        }
+        return found;
+    }
+
 public:
     // ------------------------------------------------------------
-    // 9. list_processes()
+    // 11. list_processes()
     // ------------------------------------------------------------
     std::vector<ProcessInfo> list_processes() override {
         std::vector<ProcessInfo> result;
@@ -251,7 +360,7 @@ public:
     }
 
     // ------------------------------------------------------------
-    // 10. scan_process()
+    // 12. scan_process(): scans a specific process (updated with new detections)
     // ------------------------------------------------------------
     ScanReport scan_process(int pid) override {
         ScanReport report;
@@ -275,6 +384,7 @@ public:
             return report;
         }
 
+        // --- .text verification ---
         IMAGE_DOS_HEADER dosHeader;
         IMAGE_NT_HEADERS ntHeaders;
         if (!ReadProcessMemory(hProcess, reinterpret_cast<LPCVOID>(imageBase),
@@ -339,9 +449,10 @@ public:
             report.injected_regions.push_back("Modified .text section");
         }
 
+        // --- RWX region detection ---
         auto rwx_regions = get_rwx_regions(hProcess);
         if (!rwx_regions.empty()) {
-            spdlog::warn("🚨 Found {} RWX regions in process PID {}", pid, rwx_regions.size());
+            spdlog::warn("🚨 Found {} RWX regions in process PID {}", rwx_regions.size(), pid);
             for (const auto& region : rwx_regions) {
                 std::stringstream ss;
                 ss << "RWX Region: 0x" << std::hex << region.start_address
@@ -350,12 +461,30 @@ public:
             }
         }
 
+        // --- NEW: API hook detection ---
+        auto hooks = scan_api_hooks(hProcess);
+        if (!hooks.empty()) {
+            spdlog::warn("🚨 Found {} API hooks in process PID {}", hooks.size(), pid);
+            for (const auto& hook : hooks) {
+                report.hooks_detected.push_back(hook);
+            }
+        }
+
+        // --- NEW: Signature detection ---
+        auto signatures_found = scan_signatures(hProcess);
+        if (!signatures_found.empty()) {
+            spdlog::warn("🚨 Found {} signatures in process PID {}", signatures_found.size(), pid);
+            for (const auto& sig : signatures_found) {
+                report.injected_regions.push_back(sig);
+            }
+        }
+
         CloseHandle(hProcess);
         return report;
     }
 
     // ------------------------------------------------------------
-    // 11. verify_text_section_integrity
+    // 13. verify_text_section_integrity
     // ------------------------------------------------------------
     bool verify_text_section_integrity(int pid, std::string& out_error) override {
         auto report = scan_process(pid);
@@ -368,7 +497,7 @@ public:
 };
 
 // ------------------------------------------------------------
-// 12. Factory function
+// 14. Factory function
 // ------------------------------------------------------------
 std::unique_ptr<IMemoryScanner> create_memory_scanner() {
     spdlog::info("🛠️ Creating Memory Scanner for Windows");

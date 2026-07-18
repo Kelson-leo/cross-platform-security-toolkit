@@ -43,14 +43,24 @@ int main(int argc, char* argv[]) {
         std::cout << "  Process: " << report.process_name << " (PID: " << report.pid << ")\n";
         std::cout << "  .text integrity: " << (report.text_section_integrity_ok ? "✅ OK" : "🚨 Compromised!") << "\n";
 
-        // 🔥 NEW: print suspicious regions (RWX)
+        // Suspicious regions (RWX + signatures)
         if (!report.injected_regions.empty()) {
-            std::cout << "  Suspicious regions:\n";
+            std::cout << "  Suspicious regions (" << report.injected_regions.size() << "):\n";
             for (const auto& region : report.injected_regions) {
                 std::cout << "    - " << region << "\n";
             }
         } else {
             std::cout << "  No suspicious regions found.\n";
+        }
+
+        // API hooks detected
+        if (!report.hooks_detected.empty()) {
+            std::cout << "  API hooks detected (" << report.hooks_detected.size() << "):\n";
+            for (const auto& hook : report.hooks_detected) {
+                std::cout << "    - " << hook << "\n";
+            }
+        } else {
+            std::cout << "  No API hooks detected.\n";
         }
     } else {
         print_usage(argv[0]);

@@ -26,6 +26,10 @@ target_link_libraries(anti_cheat_scanner
     spdlog::spdlog
 )
 
+if(UNIX)
+    target_link_libraries(anti_cheat_scanner ${CMAKE_DL_LIBS})
+endif()
+
 # ------------------------------------------------------------
 # TESTES
 # ------------------------------------------------------------
@@ -48,6 +52,10 @@ target_link_libraries(test_scanner
     OpenSSL::Crypto
     spdlog::spdlog
 )
+
+if(UNIX)
+    target_link_libraries(test_scanner ${CMAKE_DL_LIBS})
+endif()
 
 target_include_directories(test_scanner PRIVATE include)
 add_test(NAME ScannerTests COMMAND test_scanner)
