@@ -9,34 +9,35 @@
 std::atomic<bool> running{true};
 
 void signal_handler(int signal) {
-    spdlog::info("Recebido sinal {}, finalizando...", signal);
+    spdlog::info("Received signal {}, shutting down...", signal);
     running = false;
 }
 
 void on_alert(const NidsAlert& alert) {
-    std::cout << "\nALERTA NIDS!\n";
+    std::cout << "\nNIDS ALERT!\n";
     std::cout << "================================\n";
-    std::cout << "Tempo: " << std::chrono::system_clock::to_time_t(alert.timestamp) << "\n";
-    std::cout << "Classificacao: " << alert.classification << " (confianca: " << alert.confidence << ")\n";
-    std::cout << "Descricao: " << alert.description << "\n";
-    std::cout << "Fluxo:\n";
-    std::cout << "  Origem: " << alert.flow.src_ip << ":" << alert.flow.src_port << "\n";
-    std::cout << "  Destino: " << alert.flow.dst_ip << ":" << alert.flow.dst_port << "\n";
-    std::cout << "  Protocolo: " << (int)alert.flow.protocol << "\n";
-    std::cout << "  Pacotes: " << alert.flow.packet_count << "\n";
+    std::cout << "Time: " << std::chrono::system_clock::to_time_t(alert.timestamp) << "\n";
+    std::cout << "Classification: " << alert.classification
+              << " (confidence: " << alert.confidence << ")\n";
+    std::cout << "Description: " << alert.description << "\n";
+    std::cout << "Flow:\n";
+    std::cout << "  Source: " << alert.flow.src_ip << ":" << alert.flow.src_port << "\n";
+    std::cout << "  Destination: " << alert.flow.dst_ip << ":" << alert.flow.dst_port << "\n";
+    std::cout << "  Protocol: " << static_cast<int>(alert.flow.protocol) << "\n";
+    std::cout << "  Packets: " << alert.flow.packet_count << "\n";
     std::cout << "  Bytes: " << alert.flow.byte_count << "\n";
-    std::cout << "  Duracao: " << alert.flow.duration_seconds() << "s\n";
+    std::cout << "  Duration: " << alert.flow.duration_seconds() << "s\n";
     std::cout << "================================\n\n";
 }
 
 void print_usage(const char* prog_name) {
-    std::cout << "Uso:\n";
+    std::cout << "Usage:\n";
     std::cout << "  " << prog_name << " --interface <eth0> [--filter 'tcp']\n";
     std::cout << "  " << prog_name << " --load-model <model.json>\n";
 }
 
 int main(int argc, char* argv[]) {
-    spdlog::info("NIDS com ML v1.0");
+    spdlog::info("ML-NIDS v1.0");
 
     if (argc < 2) {
         print_usage(argv[0]);
@@ -48,17 +49,17 @@ int main(int argc, char* argv[]) {
 
     auto nids = create_nids();
     if (!nids) {
-        spdlog::error("Falha ao criar NIDS.");
+        spdlog::error("Failed to create NIDS engine.");
         return 1;
     }
 
-    // Carrega modelo (placeholder)
+    // Load model (placeholder)
     nids->load_model("");
 
-    // Define callback
+    // Set alert callback
     nids->set_alert_callback(on_alert);
 
-    // Inicia captura (placeholder)
+    // Parse CLI arguments
     std::string interface = "eth0";
     std::string filter = "";
     for (int i = 1; i < argc; ++i) {
@@ -71,14 +72,14 @@ int main(int argc, char* argv[]) {
     }
 
     if (nids->start_capture(interface, filter)) {
-        spdlog::info("NIDS rodando na interface: {}", interface);
+        spdlog::info("NIDS running on interface: {}", interface);
         while (running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         nids->stop_capture();
-        spdlog::info("NIDS finalizado.");
+        spdlog::info("NIDS finished.");
     } else {
-        spdlog::error("Falha ao iniciar NIDS.");
+        spdlog::error("Failed to start NIDS.");
         return 1;
     }
 

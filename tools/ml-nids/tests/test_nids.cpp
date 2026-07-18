@@ -1,9 +1,10 @@
 #include <gtest/gtest.h>
 #include "INids.hpp"
+#include "FeatureExtractor.hpp"
 #include <cmath>
 #include <thread>
 
-// Testa feature extraction
+// Verify feature count is correct (14 features)
 TEST(FeatureExtractorTest, ExtractsCorrectNumberOfFeatures) {
     NetworkFlow flow;
     flow.src_ip = "192.168.1.1";
@@ -28,7 +29,7 @@ TEST(FeatureExtractorTest, ExtractsCorrectNumberOfFeatures) {
     EXPECT_EQ(features.size(), 14);
 }
 
-// Testa duracao zero (edge case)
+// Edge case: zero-duration flow should not produce NaN or Inf
 TEST(FeatureExtractorTest, ZeroDurationDoesNotCrash) {
     NetworkFlow flow;
     flow.protocol = 6;
@@ -44,19 +45,19 @@ TEST(FeatureExtractorTest, ZeroDurationDoesNotCrash) {
     flow.rst_flag = false;
     auto now = std::chrono::steady_clock::now();
     flow.start_time = now;
-    flow.end_time = now; // duracao = 0
+    flow.end_time = now; // duration = 0
 
     auto features = extract_flow_features(flow);
     EXPECT_EQ(features.size(), 14);
 
-    // Nenhum feature deve ser NaN ou Inf
+    // No feature should be NaN or Inf
     for (const auto& f : features) {
-        EXPECT_FALSE(std::isnan(f)) << "Feature contem NaN";
-        EXPECT_FALSE(std::isinf(f)) << "Feature contem Inf";
+        EXPECT_FALSE(std::isnan(f)) << "Feature contains NaN";
+        EXPECT_FALSE(std::isinf(f)) << "Feature contains Inf";
     }
 }
 
-// Testa protocolo UDP (sem flags TCP)
+// UDP flows should have all TCP flags set to zero
 TEST(FeatureExtractorTest, UdpFlowHasZeroTcpFlags) {
     NetworkFlow flow;
     flow.protocol = 17; // UDP
@@ -77,40 +78,38 @@ TEST(FeatureExtractorTest, UdpFlowHasZeroTcpFlags) {
     auto features = extract_flow_features(flow);
     EXPECT_EQ(features.size(), 14);
 
-    // Features 8-11 (indices 7-10) devem ser zero para UDP
-    EXPECT_EQ(features[7], 0.0); // syn
-    EXPECT_EQ(features[8], 0.0); // ack
-    EXPECT_EQ(features[9], 0.0); // fin
+    // Indices 7-10 (TCP flags) should be zero for UDP
+    EXPECT_EQ(features[7], 0.0);  // syn
+    EXPECT_EQ(features[8], 0.0);  // ack
+    EXPECT_EQ(features[9], 0.0);  // fin
     EXPECT_EQ(features[10], 0.0); // rst
 }
 
-// Testa factory
+// Factory must return a non-null, non-running engine
 TEST(NidsFactoryTest, CreateNidsReturnsValidPointer) {
     auto nids = create_nids();
     EXPECT_NE(nids, nullptr);
     EXPECT_FALSE(nids->is_running());
 }
 
-// Testa interface basica
+// Start/stop cycle should work correctly
 TEST(NidsInterfaceTest, StartStopCapture) {
     auto nids = create_nids();
     ASSERT_NE(nids, nullptr);
 
-    // Carrega modelo primeiro
     nids->load_model("");
 
     bool started = nids->start_capture("eth0");
     EXPECT_TRUE(started);
     EXPECT_TRUE(nids->is_running());
 
-    // Espera um pouco
+    // Give the dummy loop time to produce at least one alert
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     nids->stop_capture();
-    // Nota: a thread detachada pode ainda estar rodando
 }
 
-// Testa classificacao sem modelo (heuristica fallback)
+// Without a model, heuristic fallback should classify high-rate flows as malicious
 TEST(NidsClassificationTest, ClassifyWithoutModel) {
     auto nids = create_nids();
     ASSERT_NE(nids, nullptr);
@@ -121,7 +120,6 @@ TEST(NidsClassificationTest, ClassifyWithoutModel) {
     flow.end_time = flow.start_time + std::chrono::seconds(2);
 
     auto [label, confidence] = nids->classify_flow(flow);
-    // Sem modelo, deve cair na heuristica
     EXPECT_EQ(label, "Malicious");
     EXPECT_GT(confidence, 0.5);
 }

@@ -9,33 +9,48 @@ find_package(spdlog REQUIRED)
 find_package(GTest REQUIRED)
 find_package(mlpack REQUIRED)
 find_package(Armadillo REQUIRED)
+find_package(libpcap REQUIRED)
 
-# Biblioteca estatica com o core do NIDS (compartilhada entre binario e testes)
+# Static library with shared core (feature extraction)
 add_library(nids_core STATIC
-    src/NidsEngine.cpp
     src/FeatureExtractor.cpp
 )
-
 target_include_directories(nids_core PUBLIC include)
-target_link_libraries(nids_core PUBLIC
+
+# ---- Main executable (real capture via libpcap) ----
+add_executable(ml_nids
+    src/main.cpp
+)
+
+if(UNIX)
+    target_sources(ml_nids PRIVATE platform/linux_capture.cpp)
+    message(STATUS "ML-NIDS: Building for Linux with libpcap")
+elseif(WIN32)
+    target_sources(ml_nids PRIVATE platform/windows_capture.cpp)
+    message(STATUS "ML-NIDS: Building for Windows")
+endif()
+
+target_link_libraries(ml_nids PRIVATE
+    nids_core
     OpenSSL::Crypto
     spdlog::spdlog
     mlpack::mlpack
     Armadillo::Armadillo
+    libpcap::libpcap
 )
 
-if(UNIX)
-    target_sources(nids_core PRIVATE platform/linux_capture.cpp)
-elseif(WIN32)
-    target_sources(nids_core PRIVATE platform/windows_capture.cpp)
-endif()
-
-# Executavel principal
-add_executable(ml_nids src/main.cpp)
-target_link_libraries(ml_nids PRIVATE nids_core)
-
-# Testes
+# ---- Tests (dummy engine — no capture dependency) ----
 enable_testing()
-add_executable(test_nids tests/test_nids.cpp)
-target_link_libraries(test_nids PRIVATE nids_core GTest::gtest_main)
+add_executable(test_nids
+    tests/test_nids.cpp
+    src/NidsEngine.cpp
+)
+target_link_libraries(test_nids PRIVATE
+    nids_core
+    OpenSSL::Crypto
+    spdlog::spdlog
+    mlpack::mlpack
+    Armadillo::Armadillo
+    GTest::gtest_main
+)
 add_test(NAME NidsTests COMMAND test_nids)
