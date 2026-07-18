@@ -216,7 +216,7 @@ public:
         filter = filter_str;
         char errbuf[PCAP_ERRBUF_SIZE];
 
-        pcap_handle = pcap_open_live(interface.c_str(), 65536, 1, 1000, errbuf);
+        pcap_handle = pcap_open_live(interface.c_str(), 65536, 1, 100, errbuf);
         if (!pcap_handle) {
             spdlog::error("Failed to open interface {}: {}", interface, errbuf);
             return false;
@@ -268,16 +268,17 @@ public:
     void stop_capture() override {
         if (!running) return;
         running = false;
-        if (pcap_handle) {
-            pcap_breakloop(pcap_handle);
-        }
+
+        // Wait for capture thread to exit naturally (checks running flag every 100ms via timeout)
         if (capture_thread.joinable()) {
             capture_thread.join();
         }
+
         if (pcap_handle) {
             pcap_close(pcap_handle);
             pcap_handle = nullptr;
         }
+
         // Finalize remaining flows
         cleanup_flows(std::chrono::steady_clock::now());
         spdlog::info("Capture stopped.");

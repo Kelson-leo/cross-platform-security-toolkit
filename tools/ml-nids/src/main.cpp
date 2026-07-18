@@ -3,14 +3,15 @@
 #include <iostream>
 #include <string>
 #include <csignal>
+#include <cstring>
 #include <atomic>
 #include <thread>
 #include <filesystem>
 
 std::atomic<bool> running{true};
 
-void signal_handler(int signal) {
-    spdlog::info("Received signal {}, shutting down...", signal);
+void signal_handler(int sig) {
+    spdlog::info("Received signal {}, shutting down...", sig);
     running = false;
 }
 
@@ -45,8 +46,12 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
+    struct sigaction sa;
+    std::memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = signal_handler;
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
 
     auto nids = create_nids();
     if (!nids) {
