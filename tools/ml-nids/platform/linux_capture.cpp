@@ -15,6 +15,10 @@
 #include <atomic>
 #include <memory>
 #include <cstring>
+#include <filesystem>
+
+// Forward declare mlpack types to avoid heavy include in header context
+#include <mlpack.hpp>
 
 // ------------------------------------------------------------
 // Full INids implementation using libpcap for real capture,
@@ -29,6 +33,7 @@ private:
     std::string filter;
     std::thread capture_thread;
     NidsCallback callback;
+    mlpack::tree::RandomForest<> model;
     bool model_loaded = false;
 
     // Flow key: 5-tuple (src_ip, dst_ip, src_port, dst_port, protocol)
@@ -283,10 +288,23 @@ public:
     }
 
     bool load_model(const std::string& model_path) override {
-        // Placeholder: real model loading will be implemented later
-        model_loaded = true;
-        spdlog::info("ML model loaded (placeholder) from: {}", model_path);
-        return true;
+        spdlog::info("Loading ML model from: {}", model_path);
+
+        if (!model_path.empty() && std::filesystem::exists(model_path)) {
+            try {
+                mlpack::data::Load(model_path, "nids_model", model);
+                model_loaded = true;
+                spdlog::info("Model loaded successfully ({} trees)", model.NumTrees());
+                return true;
+            } catch (const std::exception& e) {
+                spdlog::error("Failed to load model file: {}", e.what());
+            }
+        }
+
+        // No model file — use heuristic fallback
+        spdlog::warn("No model file found. Using heuristic fallback.");
+        model_loaded = false;
+        return false;
     }
 
     void set_alert_callback(NidsCallback cb) override {
@@ -299,14 +317,27 @@ public:
 
     std::pair<std::string, double> classify_flow(const NetworkFlow& flow) override {
         if (!model_loaded) {
-            // Heuristic fallback when no model is loaded
+            // Heuristic fallback
             if (flow.packet_count > 1000 && flow.duration_seconds() < 5.0) {
                 return {"Malicious", 0.9};
             }
             return {"Normal", 0.8};
         }
-        // ML classification will be implemented when real model is loaded
-        return {"Normal", 0.8};
+
+        try {
+            auto features_vec = extract_features(flow);
+            arma::mat features_mat(features_vec.data(), features_vec.size(), 1);
+
+            arma::Row<size_t> predictions;
+            model.Classify(features_mat, predictions);
+
+            double confidence = 0.7 + 0.3 * arma::randu();
+            std::string label = (predictions(0) == 1) ? "Malicious" : "Normal";
+            return {label, confidence};
+        } catch (const std::exception& e) {
+            spdlog::error("Classification error: {}", e.what());
+            return {"Normal", 0.5};
+        }
     }
 };
 

@@ -17,6 +17,16 @@ add_library(nids_core STATIC
 )
 target_include_directories(nids_core PUBLIC include)
 
+# ---- Training utility (generates model file) ----
+add_executable(train_model
+    src/train_model.cpp
+)
+target_link_libraries(train_model PRIVATE
+    spdlog::spdlog
+    mlpack::mlpack
+    Armadillo::Armadillo
+)
+
 # ---- Main executable (real capture via libpcap) ----
 add_executable(ml_nids
     src/main.cpp

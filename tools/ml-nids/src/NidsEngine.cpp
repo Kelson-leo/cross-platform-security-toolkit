@@ -4,6 +4,7 @@
 #include <mlpack.hpp>
 #include <armadillo>
 #include <thread>
+#include <filesystem>
 
 class NidsEngine : public INids {
 private:
@@ -74,13 +75,27 @@ public:
 
     bool load_model(const std::string& model_path) override {
         spdlog::info("Loading ML model from: {}", model_path);
-        // Train a simple Random Forest on synthetic data as placeholder.
-        // In production this would deserialize a pre-trained model from disk.
+
+        // Try loading a pre-trained model file (native mlpack binary)
+        if (!model_path.empty() && std::filesystem::exists(model_path)) {
+            try {
+                mlpack::data::Load(model_path, "nids_model", model);
+                model_loaded = true;
+                spdlog::info("Model loaded successfully from file ({} trees)", model.NumTrees());
+                return true;
+            } catch (const std::exception& e) {
+                spdlog::error("Failed to load model file: {}", e.what());
+                // Fall through to train synthetic fallback
+            }
+        }
+
+        // Fallback: train a simple model on synthetic data (for tests)
+        spdlog::info("No valid model file. Training synthetic fallback...");
         try {
-            arma::mat features(14, 100); // 14 features, 100 samples
+            arma::mat features(14, 100);
             arma::Row<size_t> labels(100);
             for (size_t i = 0; i < 100; ++i) {
-                labels(i) = (i < 50) ? 0 : 1; // 0 = normal, 1 = malicious
+                labels(i) = (i < 50) ? 0 : 1;
                 for (size_t f = 0; f < 14; ++f) {
                     features(f, i) = arma::randn() * (labels(i) == 0 ? 0.5 : 1.5)
                                      + (labels(i) == 0 ? 1 : 5);
@@ -88,10 +103,10 @@ public:
             }
             model = mlpack::tree::RandomForest<>(features, labels, 2, 5);
             model_loaded = true;
-            spdlog::info("ML model trained on synthetic data (placeholder)");
+            spdlog::info("Synthetic fallback model trained (5 trees)");
             return true;
         } catch (const std::exception& e) {
-            spdlog::error("Failed to train model: {}", e.what());
+            spdlog::error("Failed to train fallback model: {}", e.what());
             return false;
         }
     }

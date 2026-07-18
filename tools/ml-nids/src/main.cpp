@@ -5,6 +5,7 @@
 #include <csignal>
 #include <atomic>
 #include <thread>
+#include <filesystem>
 
 std::atomic<bool> running{true};
 
@@ -32,8 +33,8 @@ void on_alert(const NidsAlert& alert) {
 
 void print_usage(const char* prog_name) {
     std::cout << "Usage:\n";
-    std::cout << "  " << prog_name << " --interface <eth0> [--filter 'tcp']\n";
-    std::cout << "  " << prog_name << " --load-model <model.json>\n";
+    std::cout << "  " << prog_name << " --interface <iface> [--filter 'tcp'] [--model <path>]\n";
+    std::cout << "  " << prog_name << " --model <path>  (dry-run: loads model only)\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -53,22 +54,38 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Load model (placeholder)
-    nids->load_model("");
-
-    // Set alert callback
-    nids->set_alert_callback(on_alert);
-
     // Parse CLI arguments
-    std::string interface = "eth0";
-    std::string filter = "";
+    std::string interface;
+    std::string filter;
+    std::string model_path;
+
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--interface" && i + 1 < argc) {
             interface = argv[++i];
         } else if (arg == "--filter" && i + 1 < argc) {
             filter = argv[++i];
+        } else if (arg == "--model" && i + 1 < argc) {
+            model_path = argv[++i];
         }
+    }
+
+    // Load ML model
+    if (!model_path.empty()) {
+        if (!nids->load_model(model_path)) {
+            spdlog::error("Failed to load model. Continuing with heuristic fallback.");
+        }
+    } else {
+        spdlog::warn("No model specified (use --model). Falling back to heuristic only.");
+    }
+
+    // Set alert callback
+    nids->set_alert_callback(on_alert);
+
+    // If no interface given but model was loaded, just exit (dry-run mode)
+    if (interface.empty()) {
+        spdlog::info("No interface specified. Model loaded. Exiting (dry-run).");
+        return 0;
     }
 
     if (nids->start_capture(interface, filter)) {
