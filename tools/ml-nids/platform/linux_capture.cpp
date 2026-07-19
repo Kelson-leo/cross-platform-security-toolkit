@@ -73,7 +73,9 @@ private:
     };
 
     std::unordered_map<FlowKey, NetworkFlow, FlowKeyHash> active_flows;
-    std::mutex flows_mutex;
+    // recursive_mutex: packet_handler holds the lock and calls cleanup_flows()
+    // which also needs the lock. std::mutex would deadlock (non-recursive).
+    std::recursive_mutex flows_mutex;
     std::chrono::steady_clock::time_point last_cleanup;
 
     // Settings
@@ -105,7 +107,7 @@ private:
         // Build flow key
         FlowKey key{src_ip_raw, dst_ip_raw, src_port, dst_port, protocol};
 
-        std::lock_guard<std::mutex> lock(flows_mutex);
+        std::lock_guard<std::recursive_mutex> lock(flows_mutex);
         auto it = active_flows.find(key);
 
         if (it == active_flows.end()) {
@@ -178,7 +180,7 @@ private:
     // Finalize idle flows and classify them
     // ------------------------------------------------------------
     void cleanup_flows(std::chrono::steady_clock::time_point now) {
-        std::lock_guard<std::mutex> lock(flows_mutex);
+        std::lock_guard<std::recursive_mutex> lock(flows_mutex);
         auto it = active_flows.begin();
         while (it != active_flows.end()) {
             auto idle = std::chrono::duration_cast<std::chrono::seconds>(now - it->second.end_time).count();
