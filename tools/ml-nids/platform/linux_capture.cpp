@@ -16,6 +16,7 @@
 #include <memory>
 #include <cstring>
 #include <filesystem>
+#include <poll.h>
 
 // Forward declare mlpack types to avoid heavy include in header context
 #include <mlpack.hpp>
@@ -222,10 +223,12 @@ public:
             return false;
         }
 
-        // Non-blocking mode: pcap_next_ex returns immediately (0 if no packet).
-        // Shutdown is handled purely by the running flag — no pcap_breakloop needed.
-        if (pcap_setnonblock(pcap_handle, 1, errbuf) == -1) {
-            spdlog::warn("Failed to set non-blocking mode: {}", errbuf);
+        // Get the file descriptor for poll()-based timeout.
+        // poll() is a kernel syscall that ALWAYS respects the timeout,
+        // regardless of driver or libpcap quirks.
+        int pcap_fd = pcap_get_selectable_fd(pcap_handle);
+        if (pcap_fd < 0) {
+            spdlog::warn("pcap_get_selectable_fd failed; shutdown may be delayed");
         }
 
         // Apply BPF filter if provided
@@ -248,9 +251,23 @@ public:
         }
 
         running = true;
-        capture_thread = std::thread([this]() {
+        int pcap_fd_captured = pcap_fd;
+        capture_thread = std::thread([this, pcap_fd_captured]() {
             spdlog::info("Starting real capture loop on {}", interface);
             while (running) {
+                // Wait for data or timeout using poll().
+                // This guarantees the running flag is checked at least every 100ms,
+                // even if the pcap read timeout is ignored by the driver.
+                if (pcap_fd_captured >= 0) {
+                    struct pollfd pfd;
+                    pfd.fd = pcap_fd_captured;
+                    pfd.events = POLLIN;
+                    int pr = poll(&pfd, 1, 100);
+                    if (pr < 0) break;    // error or fd closed
+                    if (pr == 0) continue; // timeout → check running flag
+                }
+
+                // Data available: process one batch
                 struct pcap_pkthdr* header;
                 const u_char* packet;
                 int ret = pcap_next_ex(pcap_handle, &header, &packet);
@@ -258,11 +275,9 @@ public:
                 if (ret == 1) {
                     packet_handler(header, packet);
                 } else if (ret < 0) {
-                    // -1 = error, -2 = EOF from pcap_close
-                    break;
+                    break; // -1 = error, -2 = EOF
                 }
-                // ret == 0: no packet available (non-blocking mode)
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                // ret == 0 would mean timeout, but poll() already waited
             }
             spdlog::info("Capture loop finished.");
         });
