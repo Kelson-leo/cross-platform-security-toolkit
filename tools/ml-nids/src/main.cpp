@@ -7,8 +7,11 @@
 #include <thread>
 #include <chrono>
 #include <pthread.h>
+#include <unistd.h>
 
 std::atomic<bool> running{true};
+
+#define TRACE(msg) do { write(STDERR_FILENO, msg "\n", sizeof(msg)); } while(0)
 
 // Dedicated signal-handling thread using sigwait().
 // SIGINT/SIGTERM are BLOCKED in the main thread and inherited by all threads.
@@ -23,8 +26,9 @@ void signal_thread_func() {
     int sig = 0;
     sigwait(&set, &sig);
 
-    std::cerr << "\n[SIGNAL] Caught signal " << sig << ", shutting down..." << std::endl;
+    TRACE("[TRACE] signal_thread: sigwait returned, setting running=false");
     running = false;
+    TRACE("[TRACE] signal_thread: running=false set, thread exiting");
 }
 
 void on_alert(const NidsAlert& alert) {
@@ -66,6 +70,7 @@ int main(int argc, char* argv[]) {
     sigaddset(&block_set, SIGINT);
     sigaddset(&block_set, SIGTERM);
     pthread_sigmask(SIG_BLOCK, &block_set, nullptr);
+    TRACE("[TRACE] main: signals blocked, spawning signal thread");
 
     // Spawn signal-handling thread — the ONLY thread that can receive signals.
     std::thread sig_thread(signal_thread_func);
@@ -118,13 +123,18 @@ int main(int argc, char* argv[]) {
         spdlog::info("NIDS running on interface: {}", interface);
         spdlog::info("Press Ctrl+C to stop.");
 
+        TRACE("[TRACE] main: entering main loop (sleep_for 100ms)");
         // Signals are blocked here, so sleep_for is never interrupted.
-        // No EINTR, no restart, no kernel trickery.
         while (running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            // Uncomment below to see every wakeup (very verbose):
+            // TRACE("[TRACE] main: sleep_for returned, checking running");
         }
+        TRACE("[TRACE] main: while(running) exited (running=false)");
 
+        TRACE("[TRACE] main: calling nids->stop_capture()...");
         nids->stop_capture();
+        TRACE("[TRACE] main: nids->stop_capture() returned");
         spdlog::info("NIDS finished.");
     } else {
         spdlog::error("Failed to start NIDS.");
@@ -133,6 +143,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    TRACE("[TRACE] main: joining signal thread...");
     sig_thread.join();
+    TRACE("[TRACE] main: exiting normally");
     return 0;
 }

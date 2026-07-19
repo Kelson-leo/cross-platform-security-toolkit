@@ -19,6 +19,8 @@
 #include <poll.h>
 #include <unistd.h>
 
+#define CAPTURE_TRACE(msg) do { write(STDERR_FILENO, msg "\n", sizeof(msg)); } while(0)
+
 // Forward declare mlpack types to avoid heavy include in header context
 #include <mlpack.hpp>
 
@@ -302,6 +304,7 @@ public:
                 }
                 // ret == 0: no packet available in non-blocking mode
             }
+            CAPTURE_TRACE("[TRACE] capture_thread: loop exited (running=false)");
             spdlog::info("Capture loop finished.");
         });
 
@@ -310,25 +313,36 @@ public:
     }
 
     void stop_capture() override {
-        if (!running) return;
+        CAPTURE_TRACE("[TRACE] stop_capture() entered");
+        if (!running) {
+            CAPTURE_TRACE("[TRACE] stop_capture: already stopped, returning");
+            return;
+        }
+        CAPTURE_TRACE("[TRACE] stop_capture: setting running=false");
         running = false;
 
         // Signal via self-pipe (best effort)
+        CAPTURE_TRACE("[TRACE] stop_capture: writing to pipe");
         if (pipe_wr >= 0) {
             char b = 1;
             write(pipe_wr, &b, 1);
         }
 
         // Finalize pending flows before detaching
+        CAPTURE_TRACE("[TRACE] stop_capture: calling cleanup_flows...");
         cleanup_flows(std::chrono::steady_clock::now());
+        CAPTURE_TRACE("[TRACE] stop_capture: cleanup_flows returned");
 
         // Detach: pcap_next_ex may block indefinitely on some WiFi drivers
         // despite immediate mode and timeouts. OS cleans up on process exit.
+        CAPTURE_TRACE("[TRACE] stop_capture: detaching capture thread...");
         if (capture_thread.joinable()) {
             capture_thread.detach();
         }
+        CAPTURE_TRACE("[TRACE] stop_capture: detach done");
 
         spdlog::info("Capture stopped.");
+        CAPTURE_TRACE("[TRACE] stop_capture: returning to main");
     }
 
     bool is_running() const override {
