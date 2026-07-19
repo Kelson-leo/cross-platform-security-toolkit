@@ -17,6 +17,7 @@
 #include <cstring>
 #include <filesystem>
 #include <poll.h>
+#include <unistd.h>
 
 // Forward declare mlpack types to avoid heavy include in header context
 #include <mlpack.hpp>
@@ -36,6 +37,11 @@ private:
     NidsCallback callback;
     mlpack::tree::RandomForest<> model;
     bool model_loaded = false;
+
+    // Self-pipe trick for reliable shutdown:
+    // Writing to pipe_wr wakes poll() so the capture thread exits cleanly.
+    int pipe_rd = -1;
+    int pipe_wr = -1;
 
     // Flow key: 5-tuple (src_ip, dst_ip, src_port, dst_port, protocol)
     struct FlowKey {
@@ -223,9 +229,17 @@ public:
             return false;
         }
 
-        // Get the file descriptor for poll()-based timeout.
-        // poll() is a kernel syscall that ALWAYS respects the timeout,
-        // regardless of driver or libpcap quirks.
+        // Create self-pipe for reliable shutdown signaling.
+        // Writing to pipe_wr wakes poll() so the capture thread exits immediately.
+        int pfds[2];
+        if (pipe(pfds) == 0) {
+            pipe_rd = pfds[0];
+            pipe_wr = pfds[1];
+        } else {
+            spdlog::warn("pipe() failed; shutdown may be delayed");
+        }
+
+        // Get the file descriptor for poll()-based capture.
         int pcap_fd = pcap_get_selectable_fd(pcap_handle);
         if (pcap_fd < 0) {
             spdlog::warn("pcap_get_selectable_fd failed; shutdown may be delayed");
@@ -252,22 +266,42 @@ public:
 
         running = true;
         int pcap_fd_captured = pcap_fd;
-        capture_thread = std::thread([this, pcap_fd_captured]() {
+        int pipe_rd_captured = pipe_rd;
+        capture_thread = std::thread([this, pcap_fd_captured, pipe_rd_captured]() {
             spdlog::info("Starting real capture loop on {}", interface);
             while (running) {
-                // Wait for data or timeout using poll().
-                // This guarantees the running flag is checked at least every 100ms,
-                // even if the pcap read timeout is ignored by the driver.
+                // poll() on both pcap fd and shutdown pipe.
+                // Writing to the pipe from stop_capture() wakes poll() immediately.
+                struct pollfd pfds[2];
+                int nfds = 0;
+
                 if (pcap_fd_captured >= 0) {
-                    struct pollfd pfd;
-                    pfd.fd = pcap_fd_captured;
-                    pfd.events = POLLIN;
-                    int pr = poll(&pfd, 1, 100);
-                    if (pr < 0) break;    // error or fd closed
-                    if (pr == 0) continue; // timeout → check running flag
+                    pfds[nfds].fd = pcap_fd_captured;
+                    pfds[nfds].events = POLLIN;
+                    nfds++;
+                }
+                if (pipe_rd_captured >= 0) {
+                    pfds[nfds].fd = pipe_rd_captured;
+                    pfds[nfds].events = POLLIN;
+                    nfds++;
                 }
 
-                // Data available: process one batch
+                if (nfds == 0) {
+                    // No fds available — fallback to sleep
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    continue;
+                }
+
+                int pr = poll(pfds, nfds, 100);
+                if (pr < 0) break;    // error
+                if (pr == 0) continue; // timeout → check running flag
+
+                // Check if shutdown was signaled via pipe
+                if (pipe_rd_captured >= 0 && (pfds[nfds - 1].revents & POLLIN)) {
+                    continue; // let while(running) check handle it
+                }
+
+                // Data available on pcap: process one batch
                 struct pcap_pkthdr* header;
                 const u_char* packet;
                 int ret = pcap_next_ex(pcap_handle, &header, &packet);
@@ -277,7 +311,6 @@ public:
                 } else if (ret < 0) {
                     break; // -1 = error, -2 = EOF
                 }
-                // ret == 0 would mean timeout, but poll() already waited
             }
             spdlog::info("[DEBUG] Capture loop finished (running was set to false).");
         });
@@ -293,20 +326,31 @@ public:
             return;
         }
         running = false;
-        spdlog::info("[DEBUG] Set running=false, joining capture thread...");
+        spdlog::info("[DEBUG] Set running=false, writing shutdown byte to pipe...");
 
-        // Thread will exit within 100ms (poll timeout)
+        // Self-pipe trick: write a byte to wake poll() in the capture thread.
+        // poll() returns immediately and the thread checks running=false.
+        if (pipe_wr >= 0) {
+            char b = 1;
+            ssize_t n = write(pipe_wr, &b, 1);
+            (void)n;
+        }
+
+        spdlog::info("[DEBUG] Joining capture thread...");
         if (capture_thread.joinable()) {
             capture_thread.join();
         }
-        spdlog::info("[DEBUG] Capture thread joined, closing pcap...");
+        spdlog::info("[DEBUG] Capture thread joined, cleaning up...");
+
+        // Close pipe fds
+        if (pipe_rd >= 0) { close(pipe_rd); pipe_rd = -1; }
+        if (pipe_wr >= 0) { close(pipe_wr); pipe_wr = -1; }
 
         if (pcap_handle) {
             pcap_close(pcap_handle);
             pcap_handle = nullptr;
         }
 
-        // Finalize remaining flows
         spdlog::info("[DEBUG] Finalizing remaining flows...");
         cleanup_flows(std::chrono::steady_clock::now());
         spdlog::info("Capture stopped.");
