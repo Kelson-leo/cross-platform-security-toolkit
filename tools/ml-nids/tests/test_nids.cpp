@@ -3,6 +3,11 @@
 #include "FeatureExtractor.hpp"
 #include <cmath>
 #include <thread>
+#include <atomic>
+#include <csignal>
+#include <cstring>
+#include <unistd.h>
+#include <poll.h>
 
 // Verify feature count is correct (14 features)
 TEST(FeatureExtractorTest, ExtractsCorrectNumberOfFeatures) {
@@ -122,6 +127,113 @@ TEST(NidsClassificationTest, ClassifyWithoutModel) {
     auto [label, confidence] = nids->classify_flow(flow);
     EXPECT_EQ(label, "Malicious");
     EXPECT_GT(confidence, 0.5);
+}
+
+// Self-pipe trick: writing to pipe_wr wakes poll() on pipe_rd immediately.
+// This is the mechanism that makes Ctrl+C shutdown instant.
+TEST(ShutdownMechanismTest, SelfPipeWakesPollInstantly) {
+    int pfds[2];
+    ASSERT_EQ(pipe(pfds), 0);
+
+    struct pollfd pfd;
+    pfd.fd = pfds[0];
+    pfd.events = POLLIN;
+
+    // Write from a separate thread to simulate signal handler
+    std::thread writer([&pfds]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        char b = 1;
+        write(pfds[1], &b, 1);
+    });
+
+    // poll should return within ~20ms (10ms sleep + write), not 5000ms
+    auto start = std::chrono::steady_clock::now();
+    int ret = poll(&pfd, 1, 5000);
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+
+    writer.join();
+    close(pfds[0]);
+    close(pfds[1]);
+
+    EXPECT_EQ(ret, 1);
+    EXPECT_LT(elapsed, 1000); // should wake in <1s, not the full 5s
+}
+
+// Verify that atomic flag + poll loop exits cleanly (simulates main loop)
+TEST(ShutdownMechanismTest, AtomicFlagPollLoopExitsOnSignal) {
+    int pfds[2];
+    ASSERT_EQ(pipe(pfds), 0);
+
+    std::atomic<bool> run{true};
+
+    // Simulate signal handler: set flag + write to pipe
+    std::thread signal_sim([&pfds, &run]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        run = false;
+        char b = 1;
+        write(pfds[1], &b, 1);
+    });
+
+    // Main loop (same pattern as main.cpp)
+    struct pollfd pfd;
+    pfd.fd = pfds[0];
+    pfd.events = POLLIN;
+    int iterations = 0;
+    while (run) {
+        poll(&pfd, 1, 100);
+        iterations++;
+    }
+
+    signal_sim.join();
+    close(pfds[0]);
+    close(pfds[1]);
+
+    EXPECT_LE(iterations, 2); // should exit in 1-2 iterations
+}
+
+// start_capture/stop_capture cycle with the dummy engine must work correctly
+TEST(NidsInterfaceTest, MultipleStartStopCycles) {
+    auto nids = create_nids();
+    ASSERT_NE(nids, nullptr);
+
+    // First cycle
+    EXPECT_TRUE(nids->start_capture("lo"));
+    EXPECT_TRUE(nids->is_running());
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    nids->stop_capture();
+
+    // Second cycle
+    EXPECT_TRUE(nids->start_capture("lo"));
+    EXPECT_TRUE(nids->is_running());
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    nids->stop_capture();
+}
+
+// Verify that double stop_capture() is safe (idempotent)
+TEST(NidsInterfaceTest, DoubleStopIsSafe) {
+    auto nids = create_nids();
+    ASSERT_NE(nids, nullptr);
+
+    EXPECT_TRUE(nids->start_capture("lo"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    nids->stop_capture();
+    nids->stop_capture(); // second call should be a no-op
+    EXPECT_FALSE(nids->is_running());
+}
+
+// Total flows of different types are handled correctly by the heuristic
+TEST(NidsClassificationTest, NormalFlowClassifiedCorrectly) {
+    auto nids = create_nids();
+    ASSERT_NE(nids, nullptr);
+
+    NetworkFlow flow;
+    flow.packet_count = 10;
+    flow.start_time = std::chrono::steady_clock::now();
+    flow.end_time = flow.start_time + std::chrono::seconds(60);
+
+    auto [label, confidence] = nids->classify_flow(flow);
+    EXPECT_EQ(label, "Normal");
 }
 
 int main(int argc, char** argv) {

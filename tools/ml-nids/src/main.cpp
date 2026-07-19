@@ -5,11 +5,14 @@
 #include <csignal>
 #include <cstring>
 #include <atomic>
-#include <thread>
-#include <filesystem>
 #include <unistd.h>
+#include <poll.h>
 
 std::atomic<bool> running{true};
+
+// File descriptor for the shutdown self-pipe.
+// The signal handler writes a byte to wake the main loop's poll() instantly.
+static int shutdown_pipe_wr = -1;
 
 // Async-signal-safe handler: only calls write() and atomic store.
 // spdlog and printf are NOT safe in signal handlers (can deadlock malloc).
@@ -17,6 +20,11 @@ void signal_handler(int sig) {
     const char msg[] = "[SIGNAL] Shutting down...\n";
     write(STDERR_FILENO, msg, sizeof(msg) - 1);
     running = false;
+    // Wake the main loop's poll() immediately
+    if (shutdown_pipe_wr >= 0) {
+        char b = 1;
+        write(shutdown_pipe_wr, &b, 1);
+    }
 }
 
 void on_alert(const NidsAlert& alert) {
@@ -48,6 +56,13 @@ int main(int argc, char* argv[]) {
     if (argc < 2) {
         print_usage(argv[0]);
         return 1;
+    }
+
+    // Create self-pipe for signal-to-main-thread wakeup.
+    // poll() on this pipe replaces sleep_for(), so Ctrl+C exits instantly.
+    int shutdown_pfds[2];
+    if (pipe(shutdown_pfds) == 0) {
+        shutdown_pipe_wr = shutdown_pfds[1];
     }
 
     struct sigaction sa;
@@ -99,9 +114,20 @@ int main(int argc, char* argv[]) {
 
     if (nids->start_capture(interface, filter)) {
         spdlog::info("NIDS running on interface: {}", interface);
+
+        // poll() on the shutdown pipe instead of sleep_for().
+        // The signal handler writes to the pipe, waking poll() instantly.
+        // This avoids sleep_for() restarting on EINTR and ignoring the signal.
+        struct pollfd pfd;
+        pfd.fd = shutdown_pfds[0];
+        pfd.events = POLLIN;
         while (running) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            poll(&pfd, 1, 100);
         }
+
+        close(shutdown_pfds[0]);
+        close(shutdown_pfds[1]);
+
         nids->stop_capture();
         spdlog::info("NIDS finished.");
     } else {
