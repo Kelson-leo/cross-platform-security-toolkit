@@ -4,6 +4,11 @@ project(MLNids VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# MSVC: suppress C3016 (OpenMP index must be signed) in mlpack headers
+if(MSVC)
+    add_compile_options(/wdC3016)
+endif()
+
 find_package(OpenSSL REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(GTest REQUIRED)

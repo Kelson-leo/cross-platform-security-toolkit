@@ -6,14 +6,43 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
-#include <pthread.h>
+
+#ifdef _WIN32
+    #include <windows.h>
+#else
+    #include <pthread.h>
+#endif
 
 std::atomic<bool> running{true};
 
-// Dedicated signal-handling thread using sigwait().
-// SIGINT/SIGTERM are BLOCKED in all threads via pthread_sigmask().
-// Only this thread receives them via sigwait(), a normal function
-// with no async-signal-safety restrictions.
+// ------------------------------------------------------------
+// Signal handling — platform-specific
+//   Linux: sigwait() in dedicated thread (reliable, no async-signal-safety issues)
+//   Windows: SetConsoleCtrlHandler for Ctrl+C, signal() for SIGTERM
+// ------------------------------------------------------------
+#ifdef _WIN32
+
+BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
+    if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT) {
+        std::cerr << "\n[SIGNAL] Caught Ctrl+C, shutting down..." << std::endl;
+        running = false;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+void signal_thread_func() {
+    SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
+    signal(SIGTERM, [](int) { running = false; });
+    // Keep thread alive so the handler remains registered
+    while (running) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+}
+
+#else
+
+// POSIX: sigwait() in dedicated thread with signals blocked everywhere else
 void signal_thread_func() {
     sigset_t set;
     sigemptyset(&set);
@@ -26,6 +55,8 @@ void signal_thread_func() {
     std::cerr << "\n[SIGNAL] Caught signal " << sig << ", shutting down..." << std::endl;
     running = false;
 }
+
+#endif
 
 void on_alert(const NidsAlert& alert) {
     std::cout << "\nNIDS ALERT!\n";
@@ -69,16 +100,16 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Block SIGINT and SIGTERM in the main thread.
-    // Child threads inherit the signal mask, so signals are blocked
-    // everywhere except in the dedicated sigwait() thread.
+#ifndef _WIN32
+    // POSIX: Block SIGINT/SIGTERM in main thread so only sigwait() thread receives them
     sigset_t block_set;
     sigemptyset(&block_set);
     sigaddset(&block_set, SIGINT);
     sigaddset(&block_set, SIGTERM);
     pthread_sigmask(SIG_BLOCK, &block_set, nullptr);
+#endif
 
-    // Spawn signal-handling thread — the ONLY thread that can receive signals.
+    // Spawn signal-handling thread
     std::thread sig_thread(signal_thread_func);
 
     auto nids = create_nids();

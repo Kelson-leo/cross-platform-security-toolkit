@@ -6,8 +6,10 @@
 #include <atomic>
 #include <csignal>
 #include <cstring>
+#ifndef _WIN32
 #include <unistd.h>
 #include <poll.h>
+#endif
 
 // Verify feature count is correct (14 features)
 TEST(FeatureExtractorTest, ExtractsCorrectNumberOfFeatures) {
@@ -129,8 +131,10 @@ TEST(NidsClassificationTest, ClassifyWithoutModel) {
     EXPECT_GT(confidence, 0.5);
 }
 
+#ifndef _WIN32
 // Self-pipe trick: writing to pipe_wr wakes poll() on pipe_rd immediately.
 // This is the mechanism that makes Ctrl+C shutdown instant.
+// POSIX-only: pipe() and poll() don't exist on Windows.
 TEST(ShutdownMechanismTest, SelfPipeWakesPollInstantly) {
     int pfds[2];
     ASSERT_EQ(pipe(pfds), 0);
@@ -191,6 +195,7 @@ TEST(ShutdownMechanismTest, AtomicFlagPollLoopExitsOnSignal) {
 
     EXPECT_LE(iterations, 2); // should exit in 1-2 iterations
 }
+#endif // _WIN32
 
 // start_capture/stop_capture cycle with the dummy engine must work correctly
 TEST(NidsInterfaceTest, MultipleStartStopCycles) {

@@ -19,6 +19,11 @@ class Program
         Console.WriteLine(status);
 
         Console.WriteLine("\nPressione qualquer tecla para sair...");
-        Console.ReadKey();
+        try {
+            Console.ReadKey();
+        } catch (InvalidOperationException) {
+            // Running in CI/CD or redirected input (no console available)
+            Console.WriteLine("(non-interactive mode)");
+        }
     }
 }
