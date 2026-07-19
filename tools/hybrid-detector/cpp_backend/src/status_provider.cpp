@@ -4,7 +4,8 @@
 
 #ifdef _WIN32
     #include <windows.h>
-    #include <lmcons.h>   
+    #include <tlhelp32.h>   // CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First/Next
+    #include <lmcons.h>      // GetUserNameA, UNLEN
 #else
     #include <unistd.h>
     #include <pwd.h>
