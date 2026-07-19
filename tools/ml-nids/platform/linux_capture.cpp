@@ -19,8 +19,6 @@
 #include <poll.h>
 #include <unistd.h>
 
-#define CAPTURE_TRACE(msg) do { write(STDERR_FILENO, msg "\n", sizeof(msg)); } while(0)
-
 // Forward declare mlpack types to avoid heavy include in header context
 #include <mlpack.hpp>
 
@@ -78,9 +76,10 @@ private:
     std::recursive_mutex flows_mutex;
     std::chrono::steady_clock::time_point last_cleanup;
 
-    // Settings
-    static constexpr int FLOW_TIMEOUT_SECONDS = 60;
-    static constexpr int CLEANUP_INTERVAL_SECONDS = 10;
+    // Configurable timeouts (can be changed via set_config)
+    int flow_timeout_sec = 60;
+    int cleanup_interval_sec = 10;
+    int max_duration_sec = 0;  // 0 = disabled
 
     // ------------------------------------------------------------
     // pcap callback — invoked for each captured packet
@@ -171,30 +170,57 @@ private:
 
         // Periodic cleanup of stale flows
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_cleanup).count();
-        if (elapsed > CLEANUP_INTERVAL_SECONDS) {
+        if (elapsed > cleanup_interval_sec) {
             cleanup_flows(now);
         }
     }
 
     // ------------------------------------------------------------
-    // Finalize idle flows and classify them
+    // Finalize and classify flows using multiple triggers:
+    //   1. FIN/RST  → connection closed, classify immediately
+    //   2. Max duration → persistent connection (reverse shell), force classify
+    //   3. Idle timeout → no packets for N seconds (original behavior)
     // ------------------------------------------------------------
     void cleanup_flows(std::chrono::steady_clock::time_point now) {
         std::lock_guard<std::recursive_mutex> lock(flows_mutex);
         auto it = active_flows.begin();
         while (it != active_flows.end()) {
-            auto idle = std::chrono::duration_cast<std::chrono::seconds>(now - it->second.end_time).count();
-            if (idle > FLOW_TIMEOUT_SECONDS) {
-                NetworkFlow flow = it->second; // copy before erase
-                auto [label, confidence] = classify_flow(flow);
+            NetworkFlow& flow = it->second;
+            auto idle = std::chrono::duration_cast<std::chrono::seconds>(
+                now - flow.end_time).count();
+            auto duration = std::chrono::duration_cast<std::chrono::seconds>(
+                flow.end_time - flow.start_time).count();
+
+            bool should_remove = false;
+            std::string trigger;
+
+            // Trigger 1: Connection closed (FIN or RST) — classify NOW
+            if (flow.fin_flag || flow.rst_flag) {
+                should_remove = true;
+                trigger = flow.rst_flag ? "RST" : "FIN";
+            }
+            // Trigger 2: Max duration exceeded — catch persistent connections
+            else if (max_duration_sec > 0 && duration > max_duration_sec) {
+                should_remove = true;
+                trigger = "max_duration(" + std::to_string(max_duration_sec) + "s)";
+            }
+            // Trigger 3: Idle timeout — original behavior
+            else if (idle > flow_timeout_sec) {
+                should_remove = true;
+                trigger = "idle_timeout(" + std::to_string(flow_timeout_sec) + "s)";
+            }
+
+            if (should_remove) {
+                NetworkFlow flow_copy = flow;
+                auto [label, confidence] = classify_flow(flow_copy);
                 if (label == "Malicious" || confidence > 0.8) {
                     NidsAlert alert;
                     alert.timestamp = std::chrono::system_clock::now();
-                    alert.flow = flow;
+                    alert.flow = flow_copy;
                     alert.classification = label;
                     alert.confidence = confidence;
-                    alert.description = "Flow classified as " + label
-                        + " (confidence: " + std::to_string(confidence) + ")";
+                    alert.description = "[" + trigger + "] Flow classified as "
+                        + label + " (confidence: " + std::to_string(confidence) + ")";
                     if (callback) callback(alert);
                 }
                 it = active_flows.erase(it);
@@ -306,7 +332,6 @@ public:
                 }
                 // ret == 0: no packet available in non-blocking mode
             }
-            CAPTURE_TRACE("[TRACE] capture_thread: loop exited (running=false)");
             spdlog::info("Capture loop finished.");
         });
 
@@ -315,36 +340,25 @@ public:
     }
 
     void stop_capture() override {
-        CAPTURE_TRACE("[TRACE] stop_capture() entered");
-        if (!running) {
-            CAPTURE_TRACE("[TRACE] stop_capture: already stopped, returning");
-            return;
-        }
-        CAPTURE_TRACE("[TRACE] stop_capture: setting running=false");
+        if (!running) return;
         running = false;
 
         // Signal via self-pipe (best effort)
-        CAPTURE_TRACE("[TRACE] stop_capture: writing to pipe");
         if (pipe_wr >= 0) {
             char b = 1;
             write(pipe_wr, &b, 1);
         }
 
         // Finalize pending flows before detaching
-        CAPTURE_TRACE("[TRACE] stop_capture: calling cleanup_flows...");
         cleanup_flows(std::chrono::steady_clock::now());
-        CAPTURE_TRACE("[TRACE] stop_capture: cleanup_flows returned");
 
         // Detach: pcap_next_ex may block indefinitely on some WiFi drivers
         // despite immediate mode and timeouts. OS cleans up on process exit.
-        CAPTURE_TRACE("[TRACE] stop_capture: detaching capture thread...");
         if (capture_thread.joinable()) {
             capture_thread.detach();
         }
-        CAPTURE_TRACE("[TRACE] stop_capture: detach done");
 
         spdlog::info("Capture stopped.");
-        CAPTURE_TRACE("[TRACE] stop_capture: returning to main");
     }
 
     bool is_running() const override {
@@ -369,6 +383,15 @@ public:
         spdlog::warn("No model file found. Using heuristic fallback.");
         model_loaded = false;
         return false;
+    }
+
+    void set_config(int flow_timeout, int cleanup_interval,
+                    int max_duration = 0) override {
+        if (flow_timeout > 0) flow_timeout_sec = flow_timeout;
+        if (cleanup_interval > 0) cleanup_interval_sec = cleanup_interval;
+        max_duration_sec = max_duration;
+        spdlog::info("Config: flow_timeout={}s cleanup_interval={}s max_duration={}s",
+                     flow_timeout_sec, cleanup_interval_sec, max_duration_sec);
     }
 
     void set_alert_callback(NidsCallback cb) override {

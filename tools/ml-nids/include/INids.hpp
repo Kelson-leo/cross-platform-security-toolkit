@@ -67,6 +67,13 @@ public:
     // Load an ML model (Random Forest) from a file
     virtual bool load_model(const std::string& model_path) = 0;
 
+    // Configure detection parameters.
+    // flow_timeout_sec: idle seconds before finalizing a flow (default: 60)
+    // cleanup_interval_sec: how often to check for stale flows (default: 10)
+    // max_duration_sec: max flow age before forced classification, 0=disabled (default: 0)
+    virtual void set_config(int flow_timeout_sec, int cleanup_interval_sec,
+                            int max_duration_sec = 0) = 0;
+
     // Set the alert callback
     virtual void set_alert_callback(NidsCallback callback) = 0;
 

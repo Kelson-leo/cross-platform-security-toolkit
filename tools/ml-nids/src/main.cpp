@@ -7,16 +7,13 @@
 #include <thread>
 #include <chrono>
 #include <pthread.h>
-#include <unistd.h>
 
 std::atomic<bool> running{true};
 
-#define TRACE(msg) do { write(STDERR_FILENO, msg "\n", sizeof(msg)); } while(0)
-
 // Dedicated signal-handling thread using sigwait().
-// SIGINT/SIGTERM are BLOCKED in the main thread and inherited by all threads.
-// Only this thread can receive them, and sigwait() is a normal (non-async)
-// function — no restrictions, no deadlocks, no kernel weirdness.
+// SIGINT/SIGTERM are BLOCKED in all threads via pthread_sigmask().
+// Only this thread receives them via sigwait(), a normal function
+// with no async-signal-safety restrictions.
 void signal_thread_func() {
     sigset_t set;
     sigemptyset(&set);
@@ -26,9 +23,8 @@ void signal_thread_func() {
     int sig = 0;
     sigwait(&set, &sig);
 
-    TRACE("[TRACE] signal_thread: sigwait returned, setting running=false");
+    std::cerr << "\n[SIGNAL] Caught signal " << sig << ", shutting down..." << std::endl;
     running = false;
-    TRACE("[TRACE] signal_thread: running=false set, thread exiting");
 }
 
 void on_alert(const NidsAlert& alert) {
@@ -52,6 +48,10 @@ void print_usage(const char* prog_name) {
     std::cout << "Usage:\n";
     std::cout << "  " << prog_name << " --interface <iface> [--filter 'tcp'] [--model <path>]\n";
     std::cout << "  " << prog_name << " --model <path>  (dry-run: loads model only)\n";
+    std::cout << "Options:\n";
+    std::cout << "  --flow-timeout <sec>    Idle seconds before finalizing a flow (default: 60)\n";
+    std::cout << "  --cleanup-interval <sec> How often to check for stale flows (default: 10)\n";
+    std::cout << "  --max-duration <sec>    Max flow age before forced classify, 0=off (default: 0)\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -70,7 +70,6 @@ int main(int argc, char* argv[]) {
     sigaddset(&block_set, SIGINT);
     sigaddset(&block_set, SIGTERM);
     pthread_sigmask(SIG_BLOCK, &block_set, nullptr);
-    TRACE("[TRACE] main: signals blocked, spawning signal thread");
 
     // Spawn signal-handling thread — the ONLY thread that can receive signals.
     std::thread sig_thread(signal_thread_func);
@@ -87,6 +86,9 @@ int main(int argc, char* argv[]) {
     std::string interface;
     std::string filter;
     std::string model_path;
+    int flow_timeout = 0;       // 0 = use default (60s)
+    int cleanup_interval = 0;   // 0 = use default (10s)
+    int max_duration = 0;       // 0 = disabled
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -96,6 +98,12 @@ int main(int argc, char* argv[]) {
             filter = argv[++i];
         } else if (arg == "--model" && i + 1 < argc) {
             model_path = argv[++i];
+        } else if (arg == "--flow-timeout" && i + 1 < argc) {
+            flow_timeout = std::stoi(argv[++i]);
+        } else if (arg == "--cleanup-interval" && i + 1 < argc) {
+            cleanup_interval = std::stoi(argv[++i]);
+        } else if (arg == "--max-duration" && i + 1 < argc) {
+            max_duration = std::stoi(argv[++i]);
         }
     }
 
@@ -107,6 +115,9 @@ int main(int argc, char* argv[]) {
     } else {
         spdlog::warn("No model specified (use --model). Falling back to heuristic only.");
     }
+
+    // Apply configurable timeouts
+    nids->set_config(flow_timeout, cleanup_interval, max_duration);
 
     // Set alert callback
     nids->set_alert_callback(on_alert);
@@ -123,18 +134,12 @@ int main(int argc, char* argv[]) {
         spdlog::info("NIDS running on interface: {}", interface);
         spdlog::info("Press Ctrl+C to stop.");
 
-        TRACE("[TRACE] main: entering main loop (sleep_for 100ms)");
         // Signals are blocked here, so sleep_for is never interrupted.
         while (running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            // Uncomment below to see every wakeup (very verbose):
-            // TRACE("[TRACE] main: sleep_for returned, checking running");
         }
-        TRACE("[TRACE] main: while(running) exited (running=false)");
 
-        TRACE("[TRACE] main: calling nids->stop_capture()...");
         nids->stop_capture();
-        TRACE("[TRACE] main: nids->stop_capture() returned");
         spdlog::info("NIDS finished.");
     } else {
         spdlog::error("Failed to start NIDS.");
@@ -143,8 +148,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    TRACE("[TRACE] main: joining signal thread...");
     sig_thread.join();
-    TRACE("[TRACE] main: exiting normally");
     return 0;
 }

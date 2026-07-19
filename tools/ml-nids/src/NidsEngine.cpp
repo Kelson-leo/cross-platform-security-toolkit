@@ -111,6 +111,13 @@ public:
         }
     }
 
+    void set_config(int flow_timeout_sec, int cleanup_interval_sec,
+                    int max_duration_sec = 0) override {
+        (void)flow_timeout_sec;
+        (void)cleanup_interval_sec;
+        (void)max_duration_sec;
+    }
+
     void set_alert_callback(NidsCallback cb) override {
         callback = cb;
     }
