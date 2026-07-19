@@ -33,7 +33,7 @@ jobs:
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential cmake
+        sudo apt-get install -y build-essential cmake libpcap-dev
 
     # ------------------------------------------------------------
     # 1. BUILD ALL C++ PROJECTS (System Monitor, Sniffer, Hybrid Backend)
@@ -201,6 +201,47 @@ jobs:
         Pop-Location
 
     # ------------------------------------------------------------
+    # 3.5 ML-NIDS TESTS + MODEL TRAINING
+    # ------------------------------------------------------------
+    - name: Run ML-NIDS Tests (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        echo "Running ML-NIDS unit tests..."
+        cd tools/ml-nids/build
+        ./test_nids
+        echo "All ML-NIDS tests passed!"
+
+    - name: Train ML Model (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        echo "Training Random Forest model..."
+        cd tools/ml-nids/build
+        ./train_model
+        echo "Model training pipeline validated!"
+
+    - name: Run ML-NIDS Tests (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        Write-Host "Running ML-NIDS unit tests..."
+        Push-Location tools/ml-nids/build
+        ./Release/test_nids.exe
+        Write-Host "All ML-NIDS tests passed!"
+        Pop-Location
+
+    - name: Train ML Model (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        Write-Host "Training Random Forest model..."
+        Push-Location tools/ml-nids/build
+        ./Release/train_model.exe
+        Write-Host "Model training pipeline validated!"
+        Pop-Location
+
+    # ------------------------------------------------------------
     # 4. UPLOAD ARTEFACTS
     # ------------------------------------------------------------
     - name: Upload Linux Artifacts
@@ -211,7 +252,7 @@ jobs:
         path: |
           tools/system-monitor/build/system_monitor
           tools/packet-sniffer/build/packet_sniffer
-          # (O backend do hybrid não gera executável no Linux, apenas DLL Windows)
+          tools/ml-nids/build/ml_nids
 
     - name: Upload Windows Artifacts
       if: runner.os == 'Windows'
@@ -221,5 +262,6 @@ jobs:
         path: |
           tools/system-monitor/build/Release/system_monitor.exe
           tools/packet-sniffer/build/Release/packet_sniffer.exe
+          tools/ml-nids/build/Release/ml_nids.exe
           tools/hybrid-detector/cpp_backend/build/Release/hybrid_backend.dll
           tools/hybrid-detector/csharp_frontend/bin/Release/net8.0/HybridDetector.exe

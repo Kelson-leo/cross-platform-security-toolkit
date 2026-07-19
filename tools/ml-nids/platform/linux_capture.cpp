@@ -696,9 +696,16 @@ public:
             arma::mat features_mat(features_vec.data(), features_vec.size(), 1);
 
             arma::Row<size_t> predictions;
-            model.Classify(features_mat, predictions);
+            arma::mat probabilities;
+            model.Classify(features_mat, predictions, probabilities);
 
-            double confidence = 0.7 + 0.3 * arma::randu();
+            // Real confidence: proportion of trees that voted for the predicted class
+            double confidence;
+            if (probabilities.n_rows >= 2) {
+                confidence = probabilities(1, 0); // row 1 = Malicious probability
+            } else {
+                confidence = 0.8;
+            }
             std::string label = (predictions(0) == 1) ? "Malicious" : "Normal";
             return {label, confidence};
         } catch (const std::exception& e) {

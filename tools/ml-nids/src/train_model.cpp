@@ -153,6 +153,95 @@ std::string get_attack_category(const std::string& label) {
     return "Other";
 }
 
+// Synthetic training fallback — used when NSL-KDD dataset is not available (CI, etc.)
+int train_synthetic(const std::string& output_path) {
+    constexpr size_t num_samples  = 5000;
+    constexpr size_t num_features = 14;
+    constexpr size_t num_trees    = 20;
+
+    std::mt19937 rng(std::random_device{}());
+    std::uniform_real_distribution<double> unif(0.0, 1.0);
+    std::exponential_distribution<double> exp_dist(1.0);
+    std::poisson_distribution<int> poisson(15);
+
+    spdlog::info("Generating {} synthetic samples (3 profiles)...", num_samples);
+
+    arma::mat features(num_features, num_samples);
+    arma::Row<size_t> labels(num_samples);
+    int count_normal = 0, count_scan = 0, count_dos = 0;
+
+    for (size_t i = 0; i < num_samples; ++i) {
+        double roll = unif(rng);
+        int type;
+        if (roll < 0.50)       { type = 0; count_normal++; }
+        else if (roll < 0.75)  { type = 1; count_scan++; }
+        else                   { type = 2; count_dos++; }
+
+        double duration, packet_count, byte_count;
+        double syn_f, ack_f, fin_f, rst_f;
+
+        if (type == 0) {
+            duration     = exp_dist(rng) * 1.5;
+            packet_count = static_cast<double>(std::max(1, poisson(rng)));
+            byte_count   = packet_count * (200.0 + unif(rng) * 600.0);
+            syn_f = 0.3; ack_f = 0.7; fin_f = 0.2; rst_f = 0.1;
+        } else if (type == 1) {
+            duration     = 0.1 + unif(rng) * 1.9;
+            packet_count = static_cast<double>(poisson(rng) * 2 + 5);
+            byte_count   = packet_count * (100.0 + unif(rng) * 200.0);
+            syn_f = 0.9; ack_f = 0.2; fin_f = 0.0; rst_f = 0.4;
+        } else {
+            duration     = 0.5 + unif(rng) * 9.5;
+            packet_count = static_cast<double>(poisson(rng) * 15 + 50);
+            byte_count   = packet_count * (400.0 + unif(rng) * 1100.0);
+            syn_f = 0.7; ack_f = 0.6; fin_f = 0.3; rst_f = 0.2;
+        }
+
+        double ratio = 0.3 + unif(rng) * 0.4;
+        double src_pkt = packet_count * ratio;
+        double dst_pkt = packet_count - src_pkt;
+        double src_bytes = byte_count * ratio;
+        double dst_bytes = byte_count - src_bytes;
+
+        arma::vec feat(14);
+        feat(0)  = duration;
+        feat(1)  = std::log1p(packet_count);
+        feat(2)  = std::log1p(byte_count);
+        feat(3)  = src_pkt / (dst_pkt + 1.0);
+        feat(4)  = src_bytes / (dst_bytes + 1.0);
+        feat(5)  = packet_count / (duration + 0.01);
+        feat(6)  = byte_count / (packet_count + 1.0);
+        feat(7)  = (unif(rng) < syn_f) ? 1.0 : 0.0;
+        feat(8)  = (unif(rng) < ack_f) ? 1.0 : 0.0;
+        feat(9)  = (unif(rng) < fin_f) ? 1.0 : 0.0;
+        feat(10) = (unif(rng) < rst_f) ? 1.0 : 0.0;
+        feat(11) = 1.0;  // TCP
+        feat(12) = 0.0;
+        feat(13) = 0.0;
+
+        features.col(i) = feat;
+        labels(i) = (type == 0) ? 0 : 1;
+    }
+
+    spdlog::info("Distribution: Normal={}, Scanning={}, DoS={}",
+                 count_normal, count_scan, count_dos);
+    spdlog::info("Training Random Forest ({} trees)...", num_trees);
+
+    mlpack::tree::RandomForest<> model(features, labels, 2, num_trees);
+
+    arma::Row<size_t> predictions;
+    model.Classify(features, predictions);
+    size_t correct = 0;
+    for (size_t i = 0; i < num_samples; ++i)
+        if (predictions(i) == labels(i)) correct++;
+    spdlog::info("Synthetic training accuracy: {:.1f}%", 100.0 * correct / num_samples);
+
+    spdlog::info("Saving model to: {}", output_path);
+    mlpack::data::Save(output_path, "nids_model", model);
+    spdlog::info("Model saved.");
+    return 0;
+}
+
 } // anonymous namespace
 
 int main(int argc, char* argv[]) {
@@ -167,8 +256,9 @@ int main(int argc, char* argv[]) {
     spdlog::info("Loading NSL-KDD from: {}", kdd_path);
     std::ifstream file(kdd_path);
     if (!file.is_open()) {
-        spdlog::error("Failed to open {}. Download: KDDTrain+.txt from NSL-KDD.", kdd_path);
-        return 1;
+        spdlog::warn("{} not found. Falling back to synthetic data.", kdd_path);
+        // ---------- Synthetic fallback (for CI / no-dataset environments) ----------
+        return train_synthetic(output_path);
     }
 
     std::vector<std::vector<double>> all_features;

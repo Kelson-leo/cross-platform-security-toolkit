@@ -23,8 +23,11 @@ This repository is my engineering portfolio, demonstrating **modern C++ systems 
 
 | Tool | Focus | Tech Stack | Cross-Platform |
 | :--- | :--- | :--- | :--- |
-| **System Monitor** | Process enumeration & memory tracking | WinAPI (`CreateToolhelp32Snapshot`), Linux `/proc` | ✅ Windows, Linux |
+| **System Monitor** | Process enumeration & memory tracking | WinAPI, Linux `/proc` | ✅ Windows, Linux |
 | **Packet Sniffer** | Raw network traffic capture & analysis | `libpcap`/WinPcap, TCP/IP parsing | ✅ Windows, Linux |
+| **ML-NIDS** | AI-driven Network Intrusion Detection | C++20, MLpack, Random Forest, libpcap | ✅ Windows, Linux |
+| **Anti-Cheat Scanner** | Memory integrity & hook detection | ELF/PE parsing, module enumeration | ✅ Windows, Linux |
+| **Ransomware Detector** | Entropy-based crypto-ransomware detection | Shannon entropy, inotify/ReadDirectoryChangesW | ✅ Windows, Linux |
 | **Hybrid Detector** | C++/C# Interop & Threat Hooking | P/Invoke, .NET 8, C++ DLL backend | ⚠️ Windows Native |
 
 *(Check the `/tools` directory for each individual project.)*
@@ -37,8 +40,8 @@ This repository is my engineering portfolio, demonstrating **modern C++ systems 
 2. Click on the latest workflow run (green ✅)
 3. Scroll down to **Artifacts**
 4. Download:
-   - `linux-binaries` — System Monitor + Packet Sniffer (Linux)
-   - `windows-binaries` — System Monitor + Packet Sniffer + Hybrid Detector (Windows)
+   - `linux-binaries` — System Monitor + Packet Sniffer + ML-NIDS (Linux)
+   - `windows-binaries` — System Monitor + Packet Sniffer + ML-NIDS + Hybrid Detector (Windows)
 
 **Run:**
 
@@ -85,16 +88,60 @@ cp ../cpp_backend/build/Release/hybrid_backend.dll ./bin/Release/net8.0/
 dotnet run
 ```
 
+### ML-NIDS — AI-Powered Network Intrusion Detection
+
+This project transforms packet capture into an **AI-driven Security System**. It captures live traffic, aggregates packets into bidirectional flows (5-tuple), extracts 14 behavioral features, and uses a trained **Random Forest** model to classify flows as **Normal** or **Malicious** in real time.
+
+**Detected threats:** Port scanning, network scanning, DDoS/flood, data exfiltration, and C2 beaconing (botnet command & control).
+
+**How to test:**
+```bash
+cd tools/ml-nids/build
+
+# 1. Train the model (synthetic data works, NSL-KDD for production)
+./train_model
+
+# 2. Run the NIDS (requires root for packet capture)
+sudo ./ml_nids --interface eth0 --filter 'tcp' --model models/nids_model.bin
+
+# 3. Simulate an attack (in another terminal)
+nmap -sS -p 1-100 <your_gateway_ip>
+
+# 4. Watch the alerts!
+```
+
+**Model performance** (NSL-KDD, 125,973 samples, 100 trees):
+- Accuracy: 99.21% | Precision: 99.78% | Recall: 98.53% | F1: 99.15%
+
+**Key features:**
+- Bidirectional flow aggregation (SYN+RST in same flow → instant classification)
+- 6 configurable triggers (FIN/RST, idle timeout, max duration, packet/byte threshold, periodic)
+- Cross-flow scanner (detects port scans and C2 beaconing invisible to single-flow analysis)
+- Malicious-only alerting by default (no noise), with `--verbose` for all alerts
+- JSON alert logging for forensic analysis (`--alert-log alerts.json`)
+- Full Windows support via Npcap/WinPcap with feature parity
+
+```bash
+# Production example: monitor shared network, ignore own device, log to file
+sudo ./ml_nids --interface wlan0 \
+  --ignore-ip 192.168.1.100 \
+  --scan-threshold 15 \
+  --alert-log /var/log/nids/alerts.json \
+  --model models/nids_model.bin
+```
+
 ### Run the executables
 
 ```bash
 # Linux
 ./system_monitor
 sudo ./packet_sniffer          # requires root
+sudo ./ml_nids --interface eth0 --filter 'tcp'  # requires root
 
 # Windows
 ./Release/system_monitor.exe
 ./Release/packet_sniffer.exe   # run as Administrator
+./Release/ml_nids.exe --interface "Ethernet" --filter "tcp"  # run as Admin
 ./HybridDetector.exe           # from csharp_frontend/bin/Release/net8.0/
 ```
 
@@ -113,7 +160,8 @@ This project features **automated cross-platform builds** via GitHub Actions:
 - ✅ Builds on Ubuntu and Windows
 - ✅ C++ tools compiled with Conan + CMake (Linux: Makefiles, Windows: MSVC)
 - ✅ C# Hybrid Detector built with .NET 8 SDK (Windows only)
-- ✅ Runs tests on both platforms
+- ✅ ML-NIDS: runs 16 GTest unit tests on both platforms
+- ✅ ML-NIDS: validates model training pipeline (synthetic data on CI, NSL-KDD locally)
 - ✅ Uploads compiled binaries as artifacts for easy access
 
 ## 📦 Project Structure
@@ -122,28 +170,16 @@ This project features **automated cross-platform builds** via GitHub Actions:
 cross-platform-security-toolkit/
 ├── tools/
 │   ├── system-monitor/            # Process & memory monitoring
-│   │   ├── include/               # IProcessEnumerator interface
-│   │   ├── platform/              # linux_enumerator, windows_enumerator
-│   │   ├── src/                   # main.cpp
-│   │   ├── tests/                 # GTest unit tests
-│   │   ├── CMakeLists.txt
-│   │   └── conanfile.txt
 │   ├── packet-sniffer/            # Raw packet capture & analysis
-│   │   ├── include/               # IPacketCapture interface
-│   │   ├── platform/              # linux_capture (libpcap), windows_capture (Npcap)
-│   │   ├── src/                   # main.cpp
-│   │   ├── tests/                 # GTest unit tests
-│   │   ├── CMakeLists.txt
-│   │   └── conanfile.txt
-│   └── hybrid-detector/           # C++/C# interop demo
-│       ├── cpp_backend/           # C++ DLL (status provider)
-│       │   ├── include/
-│       │   ├── src/
-│       │   ├── CMakeLists.txt
-│       │   └── conanfile.txt
-│       └── csharp_frontend/       # .NET 8 console app (P/Invoke)
-│           ├── Program.cs
-│           └── HybridDetector.csproj
+│   ├── ml-nids/                   # ML-powered intrusion detection
+│   │   ├── include/               # INids interface + NetworkFlow DTO
+│   │   ├── platform/              # Linux (libpcap) + Windows (Npcap)
+│   │   ├── src/                   # main.cpp, FeatureExtractor, train_model
+│   │   ├── tests/                 # 16 GTest unit tests
+│   │   └── models/                # Trained Random Forest (nids_model.bin)
+│   ├── anti-cheat-memory-scanner/ # Memory integrity & hook detection
+│   ├── ransomware-detector/       # Entropy-based ransomware detection
+│   └── hybrid-detector/           # C++/C# interop (P/Invoke)
 ├── common/                        # Shared libraries & utilities
 ├── .github/workflows/             # CI/CD pipelines
 └── README.md
