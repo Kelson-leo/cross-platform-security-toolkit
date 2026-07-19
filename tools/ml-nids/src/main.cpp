@@ -3,28 +3,28 @@
 #include <iostream>
 #include <string>
 #include <csignal>
-#include <cstring>
 #include <atomic>
-#include <unistd.h>
-#include <poll.h>
+#include <thread>
+#include <chrono>
+#include <pthread.h>
 
 std::atomic<bool> running{true};
 
-// File descriptor for the shutdown self-pipe.
-// The signal handler writes a byte to wake the main loop's poll() instantly.
-static int shutdown_pipe_wr = -1;
+// Dedicated signal-handling thread using sigwait().
+// SIGINT/SIGTERM are BLOCKED in the main thread and inherited by all threads.
+// Only this thread can receive them, and sigwait() is a normal (non-async)
+// function — no restrictions, no deadlocks, no kernel weirdness.
+void signal_thread_func() {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+    sigaddset(&set, SIGTERM);
 
-// Async-signal-safe handler: only calls write() and atomic store.
-// spdlog and printf are NOT safe in signal handlers (can deadlock malloc).
-void signal_handler(int sig) {
-    const char msg[] = "[SIGNAL] Shutting down...\n";
-    write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    int sig = 0;
+    sigwait(&set, &sig);
+
+    std::cerr << "\n[SIGNAL] Caught signal " << sig << ", shutting down..." << std::endl;
     running = false;
-    // Wake the main loop's poll() immediately
-    if (shutdown_pipe_wr >= 0) {
-        char b = 1;
-        write(shutdown_pipe_wr, &b, 1);
-    }
 }
 
 void on_alert(const NidsAlert& alert) {
@@ -58,23 +58,23 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Create self-pipe for signal-to-main-thread wakeup.
-    // poll() on this pipe replaces sleep_for(), so Ctrl+C exits instantly.
-    int shutdown_pfds[2];
-    if (pipe(shutdown_pfds) == 0) {
-        shutdown_pipe_wr = shutdown_pfds[1];
-    }
+    // Block SIGINT and SIGTERM in the main thread.
+    // Child threads inherit the signal mask, so signals are blocked
+    // everywhere except in the dedicated sigwait() thread.
+    sigset_t block_set;
+    sigemptyset(&block_set);
+    sigaddset(&block_set, SIGINT);
+    sigaddset(&block_set, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &block_set, nullptr);
 
-    struct sigaction sa;
-    std::memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = signal_handler;
-    sa.sa_flags = 0;
-    sigaction(SIGINT, &sa, nullptr);
-    sigaction(SIGTERM, &sa, nullptr);
+    // Spawn signal-handling thread — the ONLY thread that can receive signals.
+    std::thread sig_thread(signal_thread_func);
 
     auto nids = create_nids();
     if (!nids) {
         spdlog::error("Failed to create NIDS engine.");
+        running = false;
+        sig_thread.join();
         return 1;
     }
 
@@ -109,31 +109,30 @@ int main(int argc, char* argv[]) {
     // If no interface given but model was loaded, just exit (dry-run mode)
     if (interface.empty()) {
         spdlog::info("No interface specified. Model loaded. Exiting (dry-run).");
+        running = false;
+        sig_thread.join();
         return 0;
     }
 
     if (nids->start_capture(interface, filter)) {
         spdlog::info("NIDS running on interface: {}", interface);
+        spdlog::info("Press Ctrl+C to stop.");
 
-        // poll() on the shutdown pipe instead of sleep_for().
-        // The signal handler writes to the pipe, waking poll() instantly.
-        // This avoids sleep_for() restarting on EINTR and ignoring the signal.
-        struct pollfd pfd;
-        pfd.fd = shutdown_pfds[0];
-        pfd.events = POLLIN;
+        // Signals are blocked here, so sleep_for is never interrupted.
+        // No EINTR, no restart, no kernel trickery.
         while (running) {
-            poll(&pfd, 1, 100);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-
-        close(shutdown_pfds[0]);
-        close(shutdown_pfds[1]);
 
         nids->stop_capture();
         spdlog::info("NIDS finished.");
     } else {
         spdlog::error("Failed to start NIDS.");
+        running = false;
+        sig_thread.join();
         return 1;
     }
 
+    sig_thread.join();
     return 0;
 }
