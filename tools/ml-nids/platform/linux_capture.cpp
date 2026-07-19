@@ -18,7 +18,6 @@
 #include <filesystem>
 #include <poll.h>
 #include <unistd.h>
-#include <fcntl.h>
 
 // Forward declare mlpack types to avoid heavy include in header context
 #include <mlpack.hpp>
@@ -224,44 +223,36 @@ public:
         filter = filter_str;
         char errbuf[PCAP_ERRBUF_SIZE];
 
-        pcap_handle = pcap_open_live(interface.c_str(), 65536, 1, 500, errbuf);
+        // Use pcap_create + activate so we can set immediate mode BEFORE
+        // activation. pcap_open_live activates internally, making it too
+        // late for pcap_set_immediate_mode.
+        pcap_handle = pcap_create(interface.c_str(), errbuf);
         if (!pcap_handle) {
-            spdlog::error("Failed to open interface {}: {}", interface, errbuf);
+            spdlog::error("Failed to create pcap handle for {}: {}", interface, errbuf);
             return false;
         }
+        pcap_set_snaplen(pcap_handle, 65536);
+        pcap_set_promisc(pcap_handle, 1);
+        pcap_set_timeout(pcap_handle, 500);
 
-        // Immediate mode: disables TPACKET_V3 ring buffering so the read
-        // timeout actually works on WiFi. Without this, pcap_next_ex can
-        // block indefinitely in memory-mapped mode.
+        // Immediate mode: disables TPACKET_V3 ring buffer so the timeout works.
+        // Must be called BEFORE pcap_activate().
         if (pcap_set_immediate_mode(pcap_handle, 1) != 0) {
             spdlog::warn("pcap_set_immediate_mode failed: {}", pcap_geterr(pcap_handle));
         }
 
-        // Create self-pipe for reliable shutdown signaling.
-        // Writing to pipe_wr wakes poll() so the capture thread exits immediately.
+        if (pcap_activate(pcap_handle) != 0) {
+            spdlog::error("Failed to activate pcap: {}", pcap_geterr(pcap_handle));
+            pcap_close(pcap_handle);
+            pcap_handle = nullptr;
+            return false;
+        }
+
+        // Create self-pipe for shutdown signaling
         int pfds[2];
         if (pipe(pfds) == 0) {
             pipe_rd = pfds[0];
             pipe_wr = pfds[1];
-        } else {
-            spdlog::warn("pipe() failed; shutdown may be delayed");
-        }
-
-        // Get the file descriptor for poll()-based capture.
-        int pcap_fd = pcap_get_selectable_fd(pcap_handle);
-        if (pcap_fd < 0) {
-            spdlog::warn("pcap_get_selectable_fd failed; shutdown may be delayed");
-        }
-
-        // Force kernel-level non-blocking on the pcap fd.
-        // pcap_setnonblock() can fail on some WiFi drivers, but fcntl(O_NONBLOCK)
-        // is a kernel operation that CANNOT be ignored — it makes read() return
-        // EAGAIN immediately if no data is available.
-        if (pcap_fd >= 0) {
-            int flags = fcntl(pcap_fd, F_GETFL, 0);
-            if (flags != -1) {
-                fcntl(pcap_fd, F_SETFL, flags | O_NONBLOCK);
-            }
         }
 
         // Apply BPF filter if provided
@@ -311,7 +302,7 @@ public:
                 }
                 // ret == 0: no packet available in non-blocking mode
             }
-            spdlog::info("[DEBUG] Capture loop finished (running was set to false).");
+            spdlog::info("Capture loop finished.");
         });
 
         spdlog::info("Capture started on interface: {}", interface);
@@ -319,29 +310,32 @@ public:
     }
 
     void stop_capture() override {
-        spdlog::info("[DEBUG] stop_capture() entered, running={}", running.load());
-        if (!running) {
-            spdlog::info("[DEBUG] stop_capture() returning early (already stopped)");
-            return;
-        }
+        if (!running) return;
         running = false;
 
-        // Signal the capture thread via self-pipe (best effort).
+        // Signal the capture thread via self-pipe to wake poll() immediately
         if (pipe_wr >= 0) {
             char b = 1;
             write(pipe_wr, &b, 1);
         }
 
-        // Finalize flows that were captured before shutdown.
-        cleanup_flows(std::chrono::steady_clock::now());
-
-        // We intentionally detach instead of join. On some WiFi drivers,
-        // pcap_next_ex blocks indefinitely despite O_NONBLOCK, immediate
-        // mode, and timeouts. The OS will terminate the thread on exit.
+        // With immediate mode enabled, pcap_next_ex respects the 500ms
+        // timeout, and the self-pipe wakes poll() instantly.
         if (capture_thread.joinable()) {
-            capture_thread.detach();
+            capture_thread.join();
         }
-        spdlog::info("Capture stopped (thread detached, OS will clean up).");
+
+        // Cleanup
+        if (pipe_rd >= 0) { close(pipe_rd); pipe_rd = -1; }
+        if (pipe_wr >= 0) { close(pipe_wr); pipe_wr = -1; }
+        if (pcap_handle) {
+            pcap_close(pcap_handle);
+            pcap_handle = nullptr;
+        }
+
+        // Finalize pending flows
+        cleanup_flows(std::chrono::steady_clock::now());
+        spdlog::info("Capture stopped.");
     }
 
     bool is_running() const override {
