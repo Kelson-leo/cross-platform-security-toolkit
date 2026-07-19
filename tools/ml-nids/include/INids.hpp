@@ -32,6 +32,9 @@ struct NetworkFlow {
     bool fin_flag;
     bool rst_flag;
 
+    // Timestamp of last classification (for periodic classify dedup)
+    std::chrono::steady_clock::time_point last_classified;
+
     // Duration in seconds
     double duration_seconds() const {
         auto duration = end_time - start_time;
@@ -67,12 +70,18 @@ public:
     // Load an ML model (Random Forest) from a file
     virtual bool load_model(const std::string& model_path) = 0;
 
-    // Configure detection parameters.
-    // flow_timeout_sec: idle seconds before finalizing a flow (default: 60)
-    // cleanup_interval_sec: how often to check for stale flows (default: 10)
-    // max_duration_sec: max flow age before forced classification, 0=disabled (default: 0)
+    // Configure detection parameters. Pass 0 to keep the default.
+    //   flow_timeout_sec:    idle seconds before finalizing a flow (default: 60)
+    //   cleanup_interval_sec: how often to check for triggers (default: 10)
+    //   max_duration_sec:    max flow age before forced classify, 0=off (default: 0)
+    //   packet_threshold:    classify flow if > N packets, 0=off (default: 0)
+    //   byte_threshold:      classify flow if > N bytes, 0=off (default: 0)
+    //   periodic_classify_sec: classify ALL active flows every N sec, 0=off (default: 0)
     virtual void set_config(int flow_timeout_sec, int cleanup_interval_sec,
-                            int max_duration_sec = 0) = 0;
+                            int max_duration_sec = 0,
+                            int packet_threshold = 0,
+                            int byte_threshold = 0,
+                            int periodic_classify_sec = 0) = 0;
 
     // Set the alert callback
     virtual void set_alert_callback(NidsCallback callback) = 0;

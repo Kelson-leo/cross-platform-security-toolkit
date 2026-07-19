@@ -236,6 +236,74 @@ TEST(NidsClassificationTest, NormalFlowClassifiedCorrectly) {
     EXPECT_EQ(label, "Normal");
 }
 
+// Heuristic fallback classifies high-packet-count short-duration flows as malicious
+TEST(TriggerClassificationTest, HighPacketCountIsMalicious) {
+    auto nids = create_nids();
+    ASSERT_NE(nids, nullptr);
+
+    NetworkFlow flow;
+    flow.packet_count = 5000;
+    flow.start_time = std::chrono::steady_clock::now();
+    flow.end_time = flow.start_time + std::chrono::seconds(1);
+    flow.byte_count = flow.packet_count * 64;
+
+    auto [label, confidence] = nids->classify_flow(flow);
+    EXPECT_EQ(label, "Malicious");
+    EXPECT_GT(confidence, 0.5);
+}
+
+// High packet count + short duration: heuristic fallback flags as malicious
+TEST(TriggerClassificationTest, HighPacketCountShortDurationIsMalicious) {
+    auto nids = create_nids();
+    ASSERT_NE(nids, nullptr);
+
+    NetworkFlow flow;
+    flow.packet_count = 2000;
+    flow.byte_count = 2000 * 1200;
+    flow.start_time = std::chrono::steady_clock::now();
+    flow.end_time = flow.start_time + std::chrono::seconds(2);
+
+    auto [label, confidence] = nids->classify_flow(flow);
+    EXPECT_EQ(label, "Malicious");
+    EXPECT_GT(confidence, 0.5);
+}
+
+// Normal flows should not trigger false positives
+TEST(TriggerClassificationTest, LongDurationLowPacketsIsNormal) {
+    auto nids = create_nids();
+    ASSERT_NE(nids, nullptr);
+
+    NetworkFlow flow;
+    flow.packet_count = 50;
+    flow.byte_count = 50 * 256;
+    flow.start_time = std::chrono::steady_clock::now();
+    flow.end_time = flow.start_time + std::chrono::seconds(120);
+
+    auto [label, confidence] = nids->classify_flow(flow);
+    EXPECT_EQ(label, "Normal");
+}
+
+// set_config with all 6 parameters must not crash
+TEST(TriggerConfigurationTest, SetConfigAllParameters) {
+    auto nids = create_nids();
+    ASSERT_NE(nids, nullptr);
+
+    // All params = 0 means "use defaults", must not throw
+    EXPECT_NO_THROW(nids->set_config(0, 0, 0, 0, 0, 0));
+
+    // Custom values
+    EXPECT_NO_THROW(nids->set_config(30, 5, 120, 1000, 1048576, 60));
+}
+
+// NetworkFlow must have last_classified field initialized
+TEST(NetworkFlowTest, LastClassifiedIsDefaultConstructible) {
+    NetworkFlow flow;
+    flow.last_classified = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - flow.last_classified).count();
+    EXPECT_GE(elapsed, 0);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

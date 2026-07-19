@@ -50,8 +50,11 @@ void print_usage(const char* prog_name) {
     std::cout << "  " << prog_name << " --model <path>  (dry-run: loads model only)\n";
     std::cout << "Options:\n";
     std::cout << "  --flow-timeout <sec>    Idle seconds before finalizing a flow (default: 60)\n";
-    std::cout << "  --cleanup-interval <sec> How often to check for stale flows (default: 10)\n";
+    std::cout << "  --cleanup-interval <sec> How often to check for triggers (default: 10)\n";
     std::cout << "  --max-duration <sec>    Max flow age before forced classify, 0=off (default: 0)\n";
+    std::cout << "  --packet-threshold <N>  Classify if flow exceeds N packets, 0=off (default: 0)\n";
+    std::cout << "  --byte-threshold <N>    Classify if flow exceeds N bytes, 0=off (default: 0)\n";
+    std::cout << "  --periodic-classify <N> Classify all active flows every N secs, 0=off (default: 0)\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -89,6 +92,9 @@ int main(int argc, char* argv[]) {
     int flow_timeout = 0;       // 0 = use default (60s)
     int cleanup_interval = 0;   // 0 = use default (10s)
     int max_duration = 0;       // 0 = disabled
+    int packet_threshold = 0;   // 0 = disabled
+    int byte_threshold = 0;     // 0 = disabled
+    int periodic_classify = 0;  // 0 = disabled
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -104,6 +110,12 @@ int main(int argc, char* argv[]) {
             cleanup_interval = std::stoi(argv[++i]);
         } else if (arg == "--max-duration" && i + 1 < argc) {
             max_duration = std::stoi(argv[++i]);
+        } else if (arg == "--packet-threshold" && i + 1 < argc) {
+            packet_threshold = std::stoi(argv[++i]);
+        } else if (arg == "--byte-threshold" && i + 1 < argc) {
+            byte_threshold = std::stoi(argv[++i]);
+        } else if (arg == "--periodic-classify" && i + 1 < argc) {
+            periodic_classify = std::stoi(argv[++i]);
         }
     }
 
@@ -117,7 +129,8 @@ int main(int argc, char* argv[]) {
     }
 
     // Apply configurable timeouts
-    nids->set_config(flow_timeout, cleanup_interval, max_duration);
+    nids->set_config(flow_timeout, cleanup_interval, max_duration,
+                     packet_threshold, byte_threshold, periodic_classify);
 
     // Set alert callback
     nids->set_alert_callback(on_alert);

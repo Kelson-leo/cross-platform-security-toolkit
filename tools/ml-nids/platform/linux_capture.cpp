@@ -76,10 +76,14 @@ private:
     std::recursive_mutex flows_mutex;
     std::chrono::steady_clock::time_point last_cleanup;
 
-    // Configurable timeouts (can be changed via set_config)
+    // Configurable thresholds (can be changed via set_config)
     int flow_timeout_sec = 60;
     int cleanup_interval_sec = 10;
-    int max_duration_sec = 0;  // 0 = disabled
+    int max_duration_sec = 0;       // 0 = disabled
+    int packet_threshold = 0;       // 0 = disabled
+    int byte_threshold = 0;         // 0 = disabled
+    int periodic_classify_sec = 0;  // 0 = disabled
+    std::chrono::steady_clock::time_point last_periodic_classify;
 
     // ------------------------------------------------------------
     // pcap callback — invoked for each captured packet
@@ -129,6 +133,7 @@ private:
             flow.ack_flag = false;
             flow.fin_flag = false;
             flow.rst_flag = false;
+            flow.last_classified = now;
 
             // TCP flags
             if (protocol == IPPROTO_TCP) {
@@ -176,13 +181,35 @@ private:
     }
 
     // ------------------------------------------------------------
+    // Fire an alert for a classified flow (helper)
+    // ------------------------------------------------------------
+    void fire_alert(const NetworkFlow& flow, const std::string& label,
+                    double confidence, const std::string& trigger) {
+        if (!callback) return;
+        if (label != "Malicious" && confidence <= 0.8) return;
+        NidsAlert alert;
+        alert.timestamp = std::chrono::system_clock::now();
+        alert.flow = flow;
+        alert.classification = label;
+        alert.confidence = confidence;
+        alert.description = "[" + trigger + "] " + label
+            + " (confidence: " + std::to_string(confidence) + ")";
+        callback(alert);
+    }
+
+    // ------------------------------------------------------------
     // Finalize and classify flows using multiple triggers:
-    //   1. FIN/RST  → connection closed, classify immediately
-    //   2. Max duration → persistent connection (reverse shell), force classify
-    //   3. Idle timeout → no packets for N seconds (original behavior)
+    //   1. FIN/RST  → connection closed, classify + remove
+    //   2. Max duration → persistent connection, classify + remove
+    //   3. Idle timeout → no packets for N seconds, classify + remove
+    //   4. Packet threshold → flood/DDoS, classify + remove
+    //   5. Byte threshold → data exfiltration, classify + remove
+    //   6. Periodic classify → classify ALL active flows every N secs, keep them
     // ------------------------------------------------------------
     void cleanup_flows(std::chrono::steady_clock::time_point now) {
         std::lock_guard<std::recursive_mutex> lock(flows_mutex);
+
+        // --- Pass 1: removal-based triggers ---
         auto it = active_flows.begin();
         while (it != active_flows.end()) {
             NetworkFlow& flow = it->second;
@@ -194,46 +221,64 @@ private:
             bool should_remove = false;
             std::string trigger;
 
-            // Trigger 1: Connection closed (FIN or RST) — classify NOW
             if (flow.fin_flag || flow.rst_flag) {
                 should_remove = true;
                 trigger = flow.rst_flag ? "RST" : "FIN";
-            }
-            // Trigger 2: Max duration exceeded — catch persistent connections
-            else if (max_duration_sec > 0 && duration > max_duration_sec) {
+            } else if (packet_threshold > 0
+                       && static_cast<int>(flow.packet_count) > packet_threshold) {
+                should_remove = true;
+                trigger = "packets(" + std::to_string(flow.packet_count)
+                        + ">" + std::to_string(packet_threshold) + ")";
+            } else if (byte_threshold > 0
+                       && static_cast<int>(flow.byte_count) > byte_threshold) {
+                should_remove = true;
+                trigger = "bytes(" + std::to_string(flow.byte_count)
+                        + ">" + std::to_string(byte_threshold) + ")";
+            } else if (max_duration_sec > 0 && duration > max_duration_sec) {
                 should_remove = true;
                 trigger = "max_duration(" + std::to_string(max_duration_sec) + "s)";
-            }
-            // Trigger 3: Idle timeout — original behavior
-            else if (idle > flow_timeout_sec) {
+            } else if (idle > flow_timeout_sec) {
                 should_remove = true;
-                trigger = "idle_timeout(" + std::to_string(flow_timeout_sec) + "s)";
+                trigger = "idle(" + std::to_string(flow_timeout_sec) + "s)";
             }
 
             if (should_remove) {
                 NetworkFlow flow_copy = flow;
                 auto [label, confidence] = classify_flow(flow_copy);
-                if (label == "Malicious" || confidence > 0.8) {
-                    NidsAlert alert;
-                    alert.timestamp = std::chrono::system_clock::now();
-                    alert.flow = flow_copy;
-                    alert.classification = label;
-                    alert.confidence = confidence;
-                    alert.description = "[" + trigger + "] Flow classified as "
-                        + label + " (confidence: " + std::to_string(confidence) + ")";
-                    if (callback) callback(alert);
-                }
+                fire_alert(flow_copy, label, confidence, trigger);
                 it = active_flows.erase(it);
             } else {
                 ++it;
             }
         }
+
+        // --- Pass 2: periodic classify (keep flows alive) ---
+        if (periodic_classify_sec > 0) {
+            auto since_last = std::chrono::duration_cast<std::chrono::seconds>(
+                now - last_periodic_classify).count();
+            if (since_last >= periodic_classify_sec) {
+                for (auto& [key, flow] : active_flows) {
+                    auto since_classified = std::chrono::duration_cast<std::chrono::seconds>(
+                        now - flow.last_classified).count();
+                    if (since_classified >= periodic_classify_sec) {
+                        auto [label, confidence] = classify_flow(flow);
+                        fire_alert(flow, label, confidence,
+                                   "periodic(" + std::to_string(periodic_classify_sec) + "s)");
+                        flow.last_classified = now;
+                    }
+                }
+                last_periodic_classify = now;
+            }
+        }
+
         last_cleanup = now;
     }
 
 public:
     LinuxNidsEngine() {
-        last_cleanup = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        last_cleanup = now;
+        last_periodic_classify = now;
     }
 
     ~LinuxNidsEngine() {
@@ -386,12 +431,18 @@ public:
     }
 
     void set_config(int flow_timeout, int cleanup_interval,
-                    int max_duration = 0) override {
+                    int max_duration = 0, int packet_thresh = 0,
+                    int byte_thresh = 0, int periodic = 0) override {
         if (flow_timeout > 0) flow_timeout_sec = flow_timeout;
         if (cleanup_interval > 0) cleanup_interval_sec = cleanup_interval;
         max_duration_sec = max_duration;
-        spdlog::info("Config: flow_timeout={}s cleanup_interval={}s max_duration={}s",
-                     flow_timeout_sec, cleanup_interval_sec, max_duration_sec);
+        packet_threshold = packet_thresh;
+        byte_threshold = byte_thresh;
+        periodic_classify_sec = periodic;
+        spdlog::info("Config: idle={}s cleanup={}s max_dur={}s "
+                     "pkt_thresh={} byte_thresh={} periodic={}s",
+                     flow_timeout_sec, cleanup_interval_sec, max_duration_sec,
+                     packet_threshold, byte_threshold, periodic_classify_sec);
     }
 
     void set_alert_callback(NidsCallback cb) override {

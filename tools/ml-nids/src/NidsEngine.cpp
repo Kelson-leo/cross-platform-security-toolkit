@@ -112,10 +112,14 @@ public:
     }
 
     void set_config(int flow_timeout_sec, int cleanup_interval_sec,
-                    int max_duration_sec = 0) override {
+                    int max_duration_sec = 0, int packet_threshold = 0,
+                    int byte_threshold = 0, int periodic_classify_sec = 0) override {
         (void)flow_timeout_sec;
         (void)cleanup_interval_sec;
         (void)max_duration_sec;
+        (void)packet_threshold;
+        (void)byte_threshold;
+        (void)periodic_classify_sec;
     }
 
     void set_alert_callback(NidsCallback cb) override {
