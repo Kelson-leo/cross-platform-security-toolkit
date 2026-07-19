@@ -29,6 +29,7 @@ This repository is my engineering portfolio, demonstrating **modern C++ systems 
 | **Anti-Cheat Scanner** | Memory integrity & hook detection | ELF/PE parsing, module enumeration | ✅ Windows, Linux |
 | **Ransomware Detector** | Entropy-based crypto-ransomware detection | Shannon entropy, inotify/ReadDirectoryChangesW | ✅ Windows, Linux |
 | **Hybrid Detector** | C++/C# Interop & Threat Hooking | P/Invoke, .NET 8, C++ DLL backend | ⚠️ Windows Native |
+| **File Integrity Monitor** | SHA-256 file integrity verification | OpenSSL EVP, nlohmann/json, `std::filesystem` | ✅ Windows, Linux |
 
 *(Check the `/tools` directory for each individual project.)*
 
@@ -40,8 +41,8 @@ This repository is my engineering portfolio, demonstrating **modern C++ systems 
 2. Click on the latest workflow run (green ✅)
 3. Scroll down to **Artifacts**
 4. Download:
-   - `linux-binaries` — System Monitor + Packet Sniffer + ML-NIDS (Linux)
-   - `windows-binaries` — System Monitor + Packet Sniffer + ML-NIDS + Hybrid Detector (Windows)
+   - `linux-binaries` — System Monitor + Packet Sniffer + ML-NIDS + File Integrity Monitor (Linux)
+   - `windows-binaries` — System Monitor + Packet Sniffer + ML-NIDS + File Integrity Monitor + Hybrid Detector (Windows)
 
 **Run:**
 
@@ -179,6 +180,7 @@ cross-platform-security-toolkit/
 │   │   └── models/                # Trained Random Forest (nids_model.bin)
 │   ├── anti-cheat-memory-scanner/ # Memory integrity & hook detection
 │   ├── ransomware-detector/       # Entropy-based ransomware detection
+│   ├── file-integrity-monitor/    # SHA-256 file integrity (OpenSSL)
 │   └── hybrid-detector/           # C++/C# interop (P/Invoke)
 ├── common/                        # Shared libraries & utilities
 ├── .github/workflows/             # CI/CD pipelines
