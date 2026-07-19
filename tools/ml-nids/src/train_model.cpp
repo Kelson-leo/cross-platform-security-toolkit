@@ -2,101 +2,154 @@
 #include <armadillo>
 #include <spdlog/spdlog.h>
 #include <iostream>
-#include <cstdlib>
-#include <ctime>
+#include <random>
 #include <cmath>
+#include <fstream>
+#include <string>
 
 // ------------------------------------------------------------
 // Standalone utility to train a Random Forest model.
-// Generates synthetic data matching the 14 features extracted
-// by FeatureExtractor, trains the model, and saves it via
-// mlpack's native serialization so load_model() can read it.
+// Generates realistic synthetic data with 3 traffic profiles
+// (Normal, Port Scanning, DoS/DDoS) matching the 14 features
+// extracted by FeatureExtractor.
 //
 // Usage: ./train_model [output_path]
 //   Default output: models/nids_model.bin
 // ------------------------------------------------------------
 
-int main(int argc, char* argv[]) {
-    std::srand(static_cast<unsigned>(std::time(nullptr)));
+namespace {
 
-    const size_t num_samples = 5000;
-    const size_t num_features = 14;
-    const size_t num_trees = 50;
-    const size_t num_classes = 2;
+// Generate one flow sample with 14 features matching the NIDS extractor.
+// type: 0 = Normal, 1 = Port Scanning, 2 = DoS/DDoS
+arma::vec generate_flow(int type, std::mt19937& rng) {
+    std::uniform_real_distribution<double> unif(0.0, 1.0);
+    std::exponential_distribution<double> exp_dist(1.0);
+    std::poisson_distribution<int> poisson(15);
+
+    double duration;
+    double packet_count;
+    double byte_count;
+    double syn_flag, ack_flag, fin_flag, rst_flag;
+    int protocol = 6; // TCP
+
+    if (type == 0) {
+        // ---- Normal traffic ----
+        duration     = exp_dist(rng) * 1.5;
+        packet_count = static_cast<double>(std::max(1, poisson(rng)));
+        byte_count   = packet_count * (200.0 + unif(rng) * 600.0);
+        syn_flag     = unif(rng) < 0.3 ? 1.0 : 0.0;
+        ack_flag     = unif(rng) < 0.7 ? 1.0 : 0.0;
+        fin_flag     = unif(rng) < 0.2 ? 1.0 : 0.0;
+        rst_flag     = unif(rng) < 0.1 ? 1.0 : 0.0;
+
+    } else if (type == 1) {
+        // ---- Port Scanning ----
+        duration     = 0.1 + unif(rng) * 1.9;
+        packet_count = static_cast<double>(poisson(rng) * 2 + 5);
+        byte_count   = packet_count * (100.0 + unif(rng) * 200.0);
+        syn_flag     = unif(rng) < 0.9 ? 1.0 : 0.0;   // 90% SYN
+        ack_flag     = unif(rng) < 0.2 ? 1.0 : 0.0;
+        fin_flag     = 0.0;
+        rst_flag     = unif(rng) < 0.4 ? 1.0 : 0.0;
+
+    } else {
+        // ---- DoS / DDoS ----
+        duration     = 0.5 + unif(rng) * 9.5;
+        packet_count = static_cast<double>(poisson(rng) * 15 + 50);
+        byte_count   = packet_count * (400.0 + unif(rng) * 1100.0);
+        syn_flag     = unif(rng) < 0.7 ? 1.0 : 0.0;
+        ack_flag     = unif(rng) < 0.6 ? 1.0 : 0.0;
+        fin_flag     = unif(rng) < 0.3 ? 1.0 : 0.0;
+        rst_flag     = unif(rng) < 0.2 ? 1.0 : 0.0;
+    }
+
+    // Source/destination packet and byte ratios
+    double ratio       = 0.3 + unif(rng) * 0.4;
+    double src_packets = packet_count * ratio;
+    double dst_packets = packet_count - src_packets;
+    double src_bytes   = byte_count * ratio;
+    double dst_bytes   = byte_count - src_bytes;
+
+    // Derived features
+    double packet_rate  = packet_count / (duration + 0.01);
+    double avg_pkt_size = byte_count / (packet_count + 1.0);
+
+    // Protocol one-hot encoding
+    double tcp  = (protocol == 6)  ? 1.0 : 0.0;
+    double udp  = (protocol == 17) ? 1.0 : 0.0;
+    double icmp = (protocol == 1)  ? 1.0 : 0.0;
+
+    arma::vec features(14);
+    features(0)  = duration;
+    features(1)  = std::log1p(packet_count);
+    features(2)  = std::log1p(byte_count);
+    features(3)  = src_packets / (dst_packets + 1.0);
+    features(4)  = src_bytes / (dst_bytes + 1.0);
+    features(5)  = packet_rate;
+    features(6)  = avg_pkt_size;
+    features(7)  = syn_flag;
+    features(8)  = ack_flag;
+    features(9)  = fin_flag;
+    features(10) = rst_flag;
+    features(11) = tcp;
+    features(12) = udp;
+    features(13) = icmp;
+
+    return features;
+}
+
+} // anonymous namespace
+
+int main(int argc, char* argv[]) {
+    constexpr size_t num_samples  = 10000;
+    constexpr size_t num_features = 14;
+    constexpr size_t num_classes  = 2;   // 0 = Normal, 1 = Malicious
+    constexpr size_t num_trees    = 50;
 
     std::string output_path = "models/nids_model.bin";
     if (argc > 1) {
         output_path = argv[1];
     }
 
-    spdlog::info("Generating {} synthetic training samples ({} features)...",
-                 num_samples, num_features);
+    std::random_device rd;
+    std::mt19937 rng(rd());
+    std::uniform_real_distribution<double> type_roll(0.0, 1.0);
+
+    spdlog::info("Generating {} synthetic training samples (3 profiles)...",
+                 num_samples);
 
     arma::mat features(num_features, num_samples);
     arma::Row<size_t> labels(num_samples);
 
+    int count_normal = 0, count_scan = 0, count_dos = 0;
+
     for (size_t i = 0; i < num_samples; ++i) {
-        bool malicious = (std::rand() % 100) < 40; // 40% malicious
-        labels(i) = malicious ? 1 : 0;
-
-        double duration, packet_count, byte_count;
-        double src_packets, dst_packets, src_bytes, dst_bytes;
-        double syn, ack, fin, rst, proto_tcp, proto_udp, proto_icmp;
-        int proto;
-
-        if (malicious) {
-            // ---- Malicious traffic patterns ----
-            duration      = 0.1 + 4.9 * (static_cast<double>(std::rand()) / RAND_MAX);
-            packet_count  = 100.0 + 4900.0 * (static_cast<double>(std::rand()) / RAND_MAX);
-            byte_count    = packet_count * (100.0 + 1400.0 * (static_cast<double>(std::rand()) / RAND_MAX));
-            src_packets   = packet_count * (0.6 + 0.3 * (static_cast<double>(std::rand()) / RAND_MAX));
-            dst_packets   = packet_count - src_packets;
-            src_bytes     = byte_count * (0.6 + 0.3 * (static_cast<double>(std::rand()) / RAND_MAX));
-            dst_bytes     = byte_count - src_bytes;
-            proto         = (std::rand() % 10 < 7) ? 6 : ((std::rand() % 10 < 8) ? 17 : 1);
-            syn           = (std::rand() % 100 < 90) ? 1.0 : 0.0;
-            ack           = (std::rand() % 100 < 80) ? 1.0 : 0.0;
-            fin           = (std::rand() % 100 < 40) ? 1.0 : 0.0;
-            rst           = (std::rand() % 100 < 50) ? 1.0 : 0.0;
+        double roll = type_roll(rng);
+        int type;
+        if (roll < 0.50) {
+            type = 0; // 50% Normal
+            count_normal++;
+        } else if (roll < 0.75) {
+            type = 1; // 25% Port Scanning
+            count_scan++;
         } else {
-            // ---- Normal traffic patterns ----
-            duration      = 0.01 + 1.99 * (static_cast<double>(std::rand()) / RAND_MAX);
-            packet_count  = 1.0 + 99.0 * (static_cast<double>(std::rand()) / RAND_MAX);
-            byte_count    = packet_count * (100.0 + 700.0 * (static_cast<double>(std::rand()) / RAND_MAX));
-            src_packets   = packet_count * (0.3 + 0.4 * (static_cast<double>(std::rand()) / RAND_MAX));
-            dst_packets   = packet_count - src_packets;
-            src_bytes     = byte_count * (0.3 + 0.4 * (static_cast<double>(std::rand()) / RAND_MAX));
-            dst_bytes     = byte_count - src_bytes;
-            proto         = (std::rand() % 10 < 8) ? 6 : ((std::rand() % 10 < 9) ? 17 : 1);
-            syn           = (std::rand() % 100 < 30) ? 1.0 : 0.0;
-            ack           = (std::rand() % 100 < 70) ? 1.0 : 0.0;
-            fin           = (std::rand() % 100 < 20) ? 1.0 : 0.0;
-            rst           = (std::rand() % 100 < 10) ? 1.0 : 0.0;
+            type = 2; // 25% DoS/DDoS
+            count_dos++;
         }
 
-        // Feature vector (same order as FeatureExtractor::extract_flow_features)
-        features(0, i)  = duration;
-        features(1, i)  = std::log1p(packet_count);
-        features(2, i)  = std::log1p(byte_count);
-        features(3, i)  = src_packets / (dst_packets + 1.0);
-        features(4, i)  = src_bytes / (dst_bytes + 1.0);
-        features(5, i)  = packet_count / (duration + 0.01);
-        features(6, i)  = byte_count / (packet_count + 1.0);
-        features(7, i)  = syn;
-        features(8, i)  = ack;
-        features(9, i)  = fin;
-        features(10, i) = rst;
-        features(11, i) = (proto == 6)  ? 1.0 : 0.0;  // TCP
-        features(12, i) = (proto == 17) ? 1.0 : 0.0;  // UDP
-        features(13, i) = (proto == 1)  ? 1.0 : 0.0;  // ICMP
+        features.col(i) = generate_flow(type, rng);
+        labels(i) = (type == 0) ? 0 : 1;
     }
+
+    spdlog::info("Distribution: Normal={}, Scanning={}, DoS={}",
+                 count_normal, count_scan, count_dos);
 
     spdlog::info("Training Random Forest ({} trees, {} classes)...",
                  num_trees, num_classes);
 
     try {
-        mlpack::tree::RandomForest<> model(
-            features, labels, num_classes, num_trees);
+        mlpack::tree::RandomForest<> model(features, labels,
+                                           num_classes, num_trees);
 
         spdlog::info("Saving model to: {}", output_path);
         mlpack::data::Save(output_path, "nids_model", model);
@@ -113,7 +166,9 @@ int main(int argc, char* argv[]) {
 
         spdlog::info("Training accuracy: {:.1f}% ({}/{})",
                      accuracy, correct, num_samples);
-        spdlog::info("Model saved successfully.");
+        spdlog::info("Model saved successfully ({} bytes).",
+                     std::to_string(static_cast<int>(
+                         std::ifstream(output_path, std::ios::ate).tellg())));
         return 0;
 
     } catch (const std::exception& e) {
