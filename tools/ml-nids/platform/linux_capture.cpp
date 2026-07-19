@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <poll.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 // Forward declare mlpack types to avoid heavy include in header context
 #include <mlpack.hpp>
@@ -245,6 +246,17 @@ public:
             spdlog::warn("pcap_get_selectable_fd failed; shutdown may be delayed");
         }
 
+        // Force kernel-level non-blocking on the pcap fd.
+        // pcap_setnonblock() can fail on some WiFi drivers, but fcntl(O_NONBLOCK)
+        // is a kernel operation that CANNOT be ignored — it makes read() return
+        // EAGAIN immediately if no data is available.
+        if (pcap_fd >= 0) {
+            int flags = fcntl(pcap_fd, F_GETFL, 0);
+            if (flags != -1) {
+                fcntl(pcap_fd, F_SETFL, flags | O_NONBLOCK);
+            }
+        }
+
         // Apply BPF filter if provided
         if (!filter.empty()) {
             struct bpf_program bpf;
@@ -265,52 +277,32 @@ public:
         }
 
         running = true;
-        int pcap_fd_captured = pcap_fd;
         int pipe_rd_captured = pipe_rd;
-        capture_thread = std::thread([this, pcap_fd_captured, pipe_rd_captured]() {
+        capture_thread = std::thread([this, pipe_rd_captured]() {
             spdlog::info("Starting real capture loop on {}", interface);
             while (running) {
-                // poll() on both pcap fd and shutdown pipe.
-                // Writing to the pipe from stop_capture() wakes poll() immediately.
-                struct pollfd pfds[2];
-                int nfds = 0;
-
-                if (pcap_fd_captured >= 0) {
-                    pfds[nfds].fd = pcap_fd_captured;
-                    pfds[nfds].events = POLLIN;
-                    nfds++;
-                }
+                // Wait on the shutdown pipe only.
+                // pcap fd is O_NONBLOCK so pcap_next_ex never blocks.
                 if (pipe_rd_captured >= 0) {
-                    pfds[nfds].fd = pipe_rd_captured;
-                    pfds[nfds].events = POLLIN;
-                    nfds++;
-                }
-
-                if (nfds == 0) {
-                    // No fds available — fallback to sleep
+                    struct pollfd pfd;
+                    pfd.fd = pipe_rd_captured;
+                    pfd.events = POLLIN;
+                    poll(&pfd, 1, 100); // 100ms timeout for idle sleep
+                } else {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    continue;
                 }
 
-                int pr = poll(pfds, nfds, 100);
-                if (pr < 0) break;    // error
-                if (pr == 0) continue; // timeout → check running flag
-
-                // Check if shutdown was signaled via pipe
-                if (pipe_rd_captured >= 0 && (pfds[nfds - 1].revents & POLLIN)) {
-                    continue; // let while(running) check handle it
-                }
-
-                // Data available on pcap: process one batch
+                // Drain all available packets (non-blocking thanks to fcntl O_NONBLOCK)
                 struct pcap_pkthdr* header;
                 const u_char* packet;
-                int ret = pcap_next_ex(pcap_handle, &header, &packet);
-
-                if (ret == 1) {
+                int ret;
+                while ((ret = pcap_next_ex(pcap_handle, &header, &packet)) == 1) {
                     packet_handler(header, packet);
-                } else if (ret < 0) {
+                }
+                if (ret < 0) {
                     break; // -1 = error, -2 = EOF
                 }
+                // ret == 0: no packet available in non-blocking mode
             }
             spdlog::info("[DEBUG] Capture loop finished (running was set to false).");
         });

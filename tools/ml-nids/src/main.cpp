@@ -7,11 +7,15 @@
 #include <atomic>
 #include <thread>
 #include <filesystem>
+#include <unistd.h>
 
 std::atomic<bool> running{true};
 
+// Async-signal-safe handler: only calls write() and atomic store.
+// spdlog and printf are NOT safe in signal handlers (can deadlock malloc).
 void signal_handler(int sig) {
-    spdlog::info("Received signal {}, shutting down...", sig);
+    const char msg[] = "[SIGNAL] Shutting down...\n";
+    write(STDERR_FILENO, msg, sizeof(msg) - 1);
     running = false;
 }
 
