@@ -279,7 +279,7 @@ public:
                 }
                 // ret == 0 would mean timeout, but poll() already waited
             }
-            spdlog::info("Capture loop finished.");
+            spdlog::info("[DEBUG] Capture loop finished (running was set to false).");
         });
 
         spdlog::info("Capture started on interface: {}", interface);
@@ -287,13 +287,19 @@ public:
     }
 
     void stop_capture() override {
-        if (!running) return;
+        spdlog::info("[DEBUG] stop_capture() entered, running={}", running.load());
+        if (!running) {
+            spdlog::info("[DEBUG] stop_capture() returning early (already stopped)");
+            return;
+        }
         running = false;
+        spdlog::info("[DEBUG] Set running=false, joining capture thread...");
 
-        // Thread will exit within 100ms (sleep_for in capture loop)
+        // Thread will exit within 100ms (poll timeout)
         if (capture_thread.joinable()) {
             capture_thread.join();
         }
+        spdlog::info("[DEBUG] Capture thread joined, closing pcap...");
 
         if (pcap_handle) {
             pcap_close(pcap_handle);
@@ -301,6 +307,7 @@ public:
         }
 
         // Finalize remaining flows
+        spdlog::info("[DEBUG] Finalizing remaining flows...");
         cleanup_flows(std::chrono::steady_clock::now());
         spdlog::info("Capture stopped.");
     }

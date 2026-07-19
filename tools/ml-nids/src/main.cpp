@@ -98,6 +98,7 @@ int main(int argc, char* argv[]) {
         while (running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
+        spdlog::info("[DEBUG] Main loop exited, calling stop_capture()...");
         nids->stop_capture();
         spdlog::info("NIDS finished.");
     } else {
