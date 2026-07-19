@@ -313,28 +313,21 @@ public:
         if (!running) return;
         running = false;
 
-        // Signal the capture thread via self-pipe to wake poll() immediately
+        // Signal via self-pipe (best effort)
         if (pipe_wr >= 0) {
             char b = 1;
             write(pipe_wr, &b, 1);
         }
 
-        // With immediate mode enabled, pcap_next_ex respects the 500ms
-        // timeout, and the self-pipe wakes poll() instantly.
-        if (capture_thread.joinable()) {
-            capture_thread.join();
-        }
-
-        // Cleanup
-        if (pipe_rd >= 0) { close(pipe_rd); pipe_rd = -1; }
-        if (pipe_wr >= 0) { close(pipe_wr); pipe_wr = -1; }
-        if (pcap_handle) {
-            pcap_close(pcap_handle);
-            pcap_handle = nullptr;
-        }
-
-        // Finalize pending flows
+        // Finalize pending flows before detaching
         cleanup_flows(std::chrono::steady_clock::now());
+
+        // Detach: pcap_next_ex may block indefinitely on some WiFi drivers
+        // despite immediate mode and timeouts. OS cleans up on process exit.
+        if (capture_thread.joinable()) {
+            capture_thread.detach();
+        }
+
         spdlog::info("Capture stopped.");
     }
 
