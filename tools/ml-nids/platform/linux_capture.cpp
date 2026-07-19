@@ -325,34 +325,23 @@ public:
             return;
         }
         running = false;
-        spdlog::info("[DEBUG] Set running=false, writing shutdown byte to pipe...");
 
-        // Self-pipe trick: write a byte to wake poll() in the capture thread.
-        // poll() returns immediately and the thread checks running=false.
+        // Signal the capture thread via self-pipe (best effort).
         if (pipe_wr >= 0) {
             char b = 1;
-            ssize_t n = write(pipe_wr, &b, 1);
-            (void)n;
+            write(pipe_wr, &b, 1);
         }
 
-        spdlog::info("[DEBUG] Joining capture thread...");
-        if (capture_thread.joinable()) {
-            capture_thread.join();
-        }
-        spdlog::info("[DEBUG] Capture thread joined, cleaning up...");
-
-        // Close pipe fds
-        if (pipe_rd >= 0) { close(pipe_rd); pipe_rd = -1; }
-        if (pipe_wr >= 0) { close(pipe_wr); pipe_wr = -1; }
-
-        if (pcap_handle) {
-            pcap_close(pcap_handle);
-            pcap_handle = nullptr;
-        }
-
-        spdlog::info("[DEBUG] Finalizing remaining flows...");
+        // Finalize flows that were captured before shutdown.
         cleanup_flows(std::chrono::steady_clock::now());
-        spdlog::info("Capture stopped.");
+
+        // We intentionally detach instead of join. On some WiFi drivers,
+        // pcap_next_ex blocks indefinitely despite O_NONBLOCK, immediate
+        // mode, and timeouts. The OS will terminate the thread on exit.
+        if (capture_thread.joinable()) {
+            capture_thread.detach();
+        }
+        spdlog::info("Capture stopped (thread detached, OS will clean up).");
     }
 
     bool is_running() const override {
