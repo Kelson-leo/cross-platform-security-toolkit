@@ -16,7 +16,6 @@
 #include <memory>
 #include <cstring>
 #include <filesystem>
-#include <poll.h>
 
 // Forward declare mlpack types to avoid heavy include in header context
 #include <mlpack.hpp>
@@ -217,21 +216,12 @@ public:
         filter = filter_str;
         char errbuf[PCAP_ERRBUF_SIZE];
 
-        pcap_handle = pcap_open_live(interface.c_str(), 65536, 1, 100, errbuf);
+        // 1ms read timeout so pcap_dispatch returns quickly and checks running flag.
+        // Combined with pcap_breakloop() in stop_capture(), shutdown is immediate.
+        pcap_handle = pcap_open_live(interface.c_str(), 65536, 1, 1, errbuf);
         if (!pcap_handle) {
             spdlog::error("Failed to open interface {}: {}", interface, errbuf);
             return false;
-        }
-
-        // Set non-blocking mode so pcap_dispatch returns immediately.
-        if (pcap_setnonblock(pcap_handle, 1, errbuf) == -1) {
-            spdlog::warn("Failed to set non-blocking mode: {}", errbuf);
-        }
-
-        // Get selectable fd for poll-based shutdown (guaranteed to work)
-        int pcap_fd = pcap_get_selectable_fd(pcap_handle);
-        if (pcap_fd == -1) {
-            spdlog::warn("pcap_get_selectable_fd failed, using sleep-based loop");
         }
 
         // Apply BPF filter if provided
@@ -254,26 +244,9 @@ public:
         }
 
         running = true;
-        int pcap_fd_capture = pcap_fd;
-        capture_thread = std::thread([this, pcap_fd_capture]() {
+        capture_thread = std::thread([this]() {
             spdlog::info("Starting real capture loop on {}", interface);
             while (running) {
-                // Use poll() on the pcap fd for reliable 100ms timeout.
-                // This guarantees the loop checks running at least every 100ms,
-                // regardless of pcap driver/timeout quirks.
-                if (pcap_fd_capture >= 0) {
-                    struct pollfd pfd;
-                    pfd.fd = pcap_fd_capture;
-                    pfd.events = POLLIN;
-                    int poll_ret = poll(&pfd, 1, 100); // 100ms timeout
-                    if (poll_ret < 0) {
-                        break; // error
-                    }
-                    if (poll_ret == 0) {
-                        continue; // timeout, check running again
-                    }
-                }
-
                 int ret = pcap_dispatch(
                     pcap_handle, 100,
                     [](unsigned char* user, const struct pcap_pkthdr* hdr, const unsigned char* pkt) {
@@ -281,10 +254,16 @@ public:
                     },
                     reinterpret_cast<unsigned char*>(this));
 
-                if (ret == -1) {
-                    spdlog::error("pcap_dispatch error: {}", pcap_geterr(pcap_handle));
+                if (ret < 0) {
+                    // -1 = error, -2 = pcap_breakloop() was called
+                    if (ret == -2) {
+                        spdlog::info("Capture loop interrupted by breakloop.");
+                    } else {
+                        spdlog::error("pcap_dispatch error: {}", pcap_geterr(pcap_handle));
+                    }
                     break;
                 }
+                // ret >= 0: processed ret packets or timed out; loop continues
             }
             spdlog::info("Capture loop finished.");
         });
@@ -297,17 +276,21 @@ public:
         if (!running) return;
         running = false;
 
-        // Close pcap first — forces any blocked pcap_dispatch to return.
-        // This is safe on Linux: pcap_close() closes the underlying fd,
-        // which causes poll() inside pcap_dispatch to wake up immediately.
+        // Signal pcap to break out of its dispatch loop.
+        // With 1ms read timeout, pcap_dispatch returns within 1ms.
+        if (pcap_handle) {
+            pcap_breakloop(pcap_handle);
+        }
+
+        // Wait for capture thread to exit (returns within 1ms of breakloop)
+        if (capture_thread.joinable()) {
+            capture_thread.join();
+        }
+
+        // Safe to close now that thread has stopped
         if (pcap_handle) {
             pcap_close(pcap_handle);
             pcap_handle = nullptr;
-        }
-
-        // Thread exits cleanly within milliseconds since pcap is closed
-        if (capture_thread.joinable()) {
-            capture_thread.join();
         }
 
         // Finalize remaining flows
