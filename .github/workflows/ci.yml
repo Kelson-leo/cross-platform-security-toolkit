@@ -24,7 +24,9 @@ jobs:
         python-version: '3.11'
 
     - name: Install Conan
-      run: pip install conan
+      run: |
+        pip install "conan>=2.0,<3.0"
+        conan --version
 
     - name: Setup Conan Profile
       run: conan profile detect --force
@@ -50,7 +52,7 @@ jobs:
 
           if [ -f ../conanfile.txt ] && [ -s ../conanfile.txt ]; then
             echo "  📦 Running Conan install..."
-            conan install .. --build=missing -s build_type=Release -s compiler.cppstd=17 --output-folder=.
+            conan install .. --build=missing -s build_type=Release -s compiler.cppstd=17 -g CMakeToolchain -g CMakeDeps --output-folder=.
             cmake .. -DCMAKE_TOOLCHAIN_FILE=./conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Release
           else
             echo "  ⚡ No Conan dependencies, using CMake directly..."
@@ -105,7 +107,7 @@ jobs:
             # a toolchain that loads the MSVC environment on Windows (pwsh doesn't
             # load VS vars automatically, unlike the Conan toolchain which does).
             Write-Host "  📦 Running Conan install..."
-            conan install .. --build=missing -s build_type=Release -s compiler.cppstd=17 --output-folder=.
+            conan install .. --build=missing -s build_type=Release -s compiler.cppstd=17 -g CMakeToolchain -g CMakeDeps --output-folder=.
             $toolchain = Join-Path (Get-Location) "conan_toolchain.cmake"
             if (-not (Test-Path $toolchain)) {
               Write-Error "conan_toolchain.cmake not found at $toolchain"
