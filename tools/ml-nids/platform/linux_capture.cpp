@@ -224,10 +224,17 @@ public:
         filter = filter_str;
         char errbuf[PCAP_ERRBUF_SIZE];
 
-        pcap_handle = pcap_open_live(interface.c_str(), 65536, 1, 100, errbuf);
+        pcap_handle = pcap_open_live(interface.c_str(), 65536, 1, 500, errbuf);
         if (!pcap_handle) {
             spdlog::error("Failed to open interface {}: {}", interface, errbuf);
             return false;
+        }
+
+        // Immediate mode: disables TPACKET_V3 ring buffering so the read
+        // timeout actually works on WiFi. Without this, pcap_next_ex can
+        // block indefinitely in memory-mapped mode.
+        if (pcap_set_immediate_mode(pcap_handle, 1) != 0) {
+            spdlog::warn("pcap_set_immediate_mode failed: {}", pcap_geterr(pcap_handle));
         }
 
         // Create self-pipe for reliable shutdown signaling.
