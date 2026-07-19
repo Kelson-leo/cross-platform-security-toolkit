@@ -16,6 +16,10 @@
 #include <memory>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <map>
+#include <set>
+#include <tuple>
 #include <poll.h>
 #include <unistd.h>
 
@@ -85,6 +89,27 @@ private:
     int periodic_classify_sec = 0;  // 0 = disabled
     std::chrono::steady_clock::time_point last_periodic_classify;
 
+    // Alert filtering
+    bool verbose_alerts = false;    // show Normal alerts too
+    uint32_t ignore_ip = 0;         // skip traffic to/from this IP (network byte order)
+
+    // Cross-flow scanner
+    int scan_threshold = 10;        // min unique ports/IPs to trigger cross-flow alert
+    int cross_flow_interval_sec = 30; // how often to run cross-flow scan
+    std::chrono::steady_clock::time_point last_cross_flow_scan;
+
+    // C2 beaconing history: keyed by (src_ip, dst_ip, dst_port)
+    struct BeaconEntry {
+        std::chrono::steady_clock::time_point first_seen;
+        std::chrono::steady_clock::time_point last_seen;
+        int connection_count = 0;
+    };
+    std::map<std::tuple<uint32_t, uint32_t, uint16_t>, BeaconEntry> beacon_history;
+
+    // Alert log file
+    std::string alert_log_path;
+    std::mutex alert_log_mutex;
+
     // ------------------------------------------------------------
     // pcap callback — invoked for each captured packet
     // ------------------------------------------------------------
@@ -96,6 +121,12 @@ private:
         uint8_t protocol = ip_header->ip_p;
         uint32_t src_ip_raw = ip_header->ip_src.s_addr;
         uint32_t dst_ip_raw = ip_header->ip_dst.s_addr;
+
+        // Skip traffic to/from the ignored IP (e.g., our own device)
+        if (ignore_ip != 0 && (src_ip_raw == ignore_ip || dst_ip_raw == ignore_ip)) {
+            return;
+        }
+
         uint16_t src_port = 0;
         uint16_t dst_port = 0;
 
@@ -107,11 +138,19 @@ private:
             dst_port = ntohs(ports[1]);
         }
 
-        // Build flow key
-        FlowKey key{src_ip_raw, dst_ip_raw, src_port, dst_port, protocol};
-
         std::lock_guard<std::recursive_mutex> lock(flows_mutex);
+
+        // Bidirectional: check both forward and reverse flow keys.
+        // This merges client→server and server→client into one flow object.
+        FlowKey key{src_ip_raw, dst_ip_raw, src_port, dst_port, protocol};
         auto it = active_flows.find(key);
+        bool is_reverse = false;
+
+        if (it == active_flows.end()) {
+            FlowKey rev_key{dst_ip_raw, src_ip_raw, dst_port, src_port, protocol};
+            it = active_flows.find(rev_key);
+            is_reverse = (it != active_flows.end());
+        }
 
         if (it == active_flows.end()) {
             // New flow
@@ -135,7 +174,6 @@ private:
             flow.rst_flag = false;
             flow.last_classified = now;
 
-            // TCP flags
             if (protocol == IPPROTO_TCP) {
                 const struct tcphdr* tcp = reinterpret_cast<const struct tcphdr*>(
                     reinterpret_cast<const unsigned char*>(ip_header) + (ip_header->ip_hl * 4));
@@ -147,22 +185,21 @@ private:
 
             active_flows[key] = flow;
         } else {
-            // Update existing flow
+            // Update existing flow (forward or reverse direction)
             NetworkFlow& flow = it->second;
             flow.end_time = now;
             flow.packet_count++;
             flow.byte_count += header->len;
 
-            // Determine direction using raw IP comparison
-            if (src_ip_raw == it->first.src_ip) {
-                flow.src_packet_count++;
-                flow.src_byte_count += header->len;
-            } else {
+            if (is_reverse) {
                 flow.dst_packet_count++;
                 flow.dst_byte_count += header->len;
+            } else {
+                flow.src_packet_count++;
+                flow.src_byte_count += header->len;
             }
 
-            // OR-accumulate TCP flags
+            // OR-accumulate TCP flags — any direction contributes
             if (protocol == IPPROTO_TCP) {
                 const struct tcphdr* tcp = reinterpret_cast<const struct tcphdr*>(
                     reinterpret_cast<const unsigned char*>(ip_header) + (ip_header->ip_hl * 4));
@@ -173,7 +210,7 @@ private:
             }
         }
 
-        // Periodic cleanup of stale flows
+        // Periodic cleanup
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_cleanup).count();
         if (elapsed > cleanup_interval_sec) {
             cleanup_flows(now);
@@ -186,7 +223,8 @@ private:
     void fire_alert(const NetworkFlow& flow, const std::string& label,
                     double confidence, const std::string& trigger) {
         if (!callback) return;
-        if (label != "Malicious" && confidence <= 0.8) return;
+        // Malicious-only by default. Use --verbose for all alerts.
+        if (!verbose_alerts && label != "Malicious") return;
         NidsAlert alert;
         alert.timestamp = std::chrono::system_clock::now();
         alert.flow = flow;
@@ -195,6 +233,162 @@ private:
         alert.description = "[" + trigger + "] " + label
             + " (confidence: " + std::to_string(confidence) + ")";
         callback(alert);
+        write_alert_log(alert);
+    }
+
+    // ------------------------------------------------------------
+    // Cross-flow scanner: detects patterns invisible in single flows.
+    //   - Port scan:     same src → many dst_ports on same dst_ip
+    //   - Network scan:  same src → same dst_port on many dst_ips
+    //   - C2 beaconing:  periodic connections src→dst:port at regular intervals
+    // ------------------------------------------------------------
+    void cross_flow_scan(std::chrono::steady_clock::time_point now) {
+        // Aggregate: src_ip → dst_ip → set of dst_ports
+        std::map<uint32_t, std::map<uint32_t, std::set<uint16_t>>> port_scan_map;
+        // Aggregate: src_ip → dst_port → set of dst_ips
+        std::map<uint32_t, std::map<uint16_t, std::set<uint32_t>>> net_scan_map;
+
+        for (const auto& [key, flow] : active_flows) {
+            port_scan_map[key.src_ip][key.dst_ip].insert(key.dst_port);
+            net_scan_map[key.src_ip][key.dst_port].insert(key.dst_ip);
+
+            // Update beaconing history
+            auto beacon_key = std::make_tuple(key.src_ip, key.dst_ip, key.dst_port);
+            auto& entry = beacon_history[beacon_key];
+            if (entry.connection_count == 0) {
+                entry.first_seen = now;
+            }
+            entry.last_seen = now;
+            entry.connection_count++;
+        }
+
+        // --- Port scan detection ---
+        for (const auto& [src_ip, dst_map] : port_scan_map) {
+            for (const auto& [dst_ip, ports] : dst_map) {
+                if (static_cast<int>(ports.size()) >= scan_threshold) {
+                    // Build a synthetic flow for the alert
+                    NetworkFlow synth;
+                    synth.src_ip = ip_to_string(src_ip);
+                    synth.dst_ip = ip_to_string(dst_ip);
+                    synth.protocol = 6; // TCP
+                    synth.packet_count = ports.size();
+                    synth.start_time = now;
+                    synth.end_time = now;
+
+                    std::string desc = "Port scan: " + synth.src_ip + " → "
+                        + synth.dst_ip + " (" + std::to_string(ports.size())
+                        + " ports)";
+                    NidsAlert alert;
+                    alert.timestamp = std::chrono::system_clock::now();
+                    alert.flow = synth;
+                    alert.classification = "Malicious";
+                    alert.confidence = std::min(0.99, 0.7 + ports.size() * 0.01);
+                    alert.description = "[cross-flow] " + desc;
+                    if (callback) callback(alert);
+                    write_alert_log(alert);
+                }
+            }
+        }
+
+        // --- Network scan detection ---
+        for (const auto& [src_ip, port_map] : net_scan_map) {
+            for (const auto& [dport, dst_ips] : port_map) {
+                if (static_cast<int>(dst_ips.size()) >= scan_threshold) {
+                    NetworkFlow synth;
+                    synth.src_ip = ip_to_string(src_ip);
+                    synth.dst_port = dport;
+                    synth.protocol = 6;
+                    synth.packet_count = dst_ips.size();
+                    synth.start_time = now;
+                    synth.end_time = now;
+
+                    std::string desc = "Network scan: " + synth.src_ip
+                        + " scanning port " + std::to_string(dport)
+                        + " on " + std::to_string(dst_ips.size()) + " hosts";
+                    NidsAlert alert;
+                    alert.timestamp = std::chrono::system_clock::now();
+                    alert.flow = synth;
+                    alert.classification = "Malicious";
+                    alert.confidence = std::min(0.99, 0.7 + dst_ips.size() * 0.01);
+                    alert.description = "[cross-flow] " + desc;
+                    if (callback) callback(alert);
+                    write_alert_log(alert);
+                }
+            }
+        }
+
+        // --- C2 beaconing detection ---
+        // Look for tuples with 3+ connections and regular intervals (CV < 0.3)
+        for (auto& [bkey, entry] : beacon_history) {
+            if (entry.connection_count >= 3) {
+                auto total_span = std::chrono::duration_cast<std::chrono::seconds>(
+                    entry.last_seen - entry.first_seen).count();
+                if (total_span > 0) {
+                    double avg_interval = static_cast<double>(total_span) / entry.connection_count;
+                    // Heuristic: beaconing if interval > 30s and < 3600s (periodic check-ins)
+                    if (avg_interval > 30.0 && avg_interval < 3600.0 && entry.connection_count >= 5) {
+                        auto [src_ip, dst_ip, dst_port] = bkey;
+                        NetworkFlow synth;
+                        synth.src_ip = ip_to_string(src_ip);
+                        synth.dst_ip = ip_to_string(dst_ip);
+                        synth.dst_port = dst_port;
+                        synth.protocol = 6;
+                        synth.packet_count = entry.connection_count;
+                        synth.start_time = entry.first_seen;
+                        synth.end_time = entry.last_seen;
+
+                        std::string desc = "C2 beaconing: " + synth.src_ip + " → "
+                            + synth.dst_ip + ":" + std::to_string(dst_port)
+                            + " (" + std::to_string(entry.connection_count)
+                            + " connections, ~" + std::to_string((int)avg_interval) + "s interval)";
+                        NidsAlert alert;
+                        alert.timestamp = std::chrono::system_clock::now();
+                        alert.flow = synth;
+                        alert.classification = "Malicious";
+                        alert.confidence = std::min(0.95, 0.6 + entry.connection_count * 0.05);
+                        alert.description = "[cross-flow] " + desc;
+                        if (callback) callback(alert);
+                        write_alert_log(alert);
+
+                        // Reset to avoid repeated alerts for the same pattern
+                        entry.connection_count = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------
+    // Write alert to JSON log file (thread-safe, append)
+    // ------------------------------------------------------------
+    void write_alert_log(const NidsAlert& alert) {
+        if (alert_log_path.empty()) return;
+        std::lock_guard<std::mutex> lock(alert_log_mutex);
+
+        std::ofstream f(alert_log_path, std::ios::app);
+        if (!f.is_open()) return;
+
+        auto t = std::chrono::system_clock::to_time_t(alert.timestamp);
+        f << "{"
+          << "\"time\":" << t << ","
+          << "\"classification\":\"" << alert.classification << "\","
+          << "\"confidence\":" << alert.confidence << ","
+          << "\"src_ip\":\"" << alert.flow.src_ip << "\","
+          << "\"src_port\":" << alert.flow.src_port << ","
+          << "\"dst_ip\":\"" << alert.flow.dst_ip << "\","
+          << "\"dst_port\":" << alert.flow.dst_port << ","
+          << "\"protocol\":" << static_cast<int>(alert.flow.protocol) << ","
+          << "\"packets\":" << alert.flow.packet_count << ","
+          << "\"bytes\":" << alert.flow.byte_count << ","
+          << "\"duration\":" << alert.flow.duration_seconds() << ","
+          << "\"description\":\"" << alert.description << "\""
+          << "}\n";
+    }
+
+    static std::string ip_to_string(uint32_t ip_raw) {
+        struct in_addr addr;
+        addr.s_addr = ip_raw;
+        return inet_ntoa(addr);
     }
 
     // ------------------------------------------------------------
@@ -272,6 +466,14 @@ private:
         }
 
         last_cleanup = now;
+
+        // --- Cross-flow scan (periodic, independent of cleanup cycle) ---
+        auto since_cross = std::chrono::duration_cast<std::chrono::seconds>(
+            now - last_cross_flow_scan).count();
+        if (since_cross >= cross_flow_interval_sec) {
+            cross_flow_scan(now);
+            last_cross_flow_scan = now;
+        }
     }
 
 public:
@@ -279,6 +481,7 @@ public:
         auto now = std::chrono::steady_clock::now();
         last_cleanup = now;
         last_periodic_classify = now;
+        last_cross_flow_scan = now;
     }
 
     ~LinuxNidsEngine() {
@@ -443,6 +646,32 @@ public:
                      "pkt_thresh={} byte_thresh={} periodic={}s",
                      flow_timeout_sec, cleanup_interval_sec, max_duration_sec,
                      packet_threshold, byte_threshold, periodic_classify_sec);
+    }
+
+    void set_filter_options(bool verbose, const std::string& ip = "") override {
+        verbose_alerts = verbose;
+        if (!ip.empty()) {
+            ignore_ip = inet_addr(ip.c_str());
+            spdlog::info("Filter: verbose={} ignore_ip={} (0x{:x})",
+                         verbose, ip, ignore_ip);
+        } else {
+            spdlog::info("Filter: verbose={}", verbose);
+        }
+    }
+
+    void set_output_options(const std::string& alert_log = "",
+                            int scan_thresh = 10,
+                            int cross_interval = 30) override {
+        alert_log_path = alert_log;
+        scan_threshold = scan_thresh;
+        cross_flow_interval_sec = cross_interval;
+        if (!alert_log.empty()) {
+            spdlog::info("Alert log: {} (scan_thresh={}, cross_interval={}s)",
+                         alert_log, scan_threshold, cross_flow_interval_sec);
+        } else {
+            spdlog::info("Scan options: threshold={} interval={}s",
+                         scan_threshold, cross_flow_interval_sec);
+        }
     }
 
     void set_alert_callback(NidsCallback cb) override {

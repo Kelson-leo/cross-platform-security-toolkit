@@ -55,6 +55,10 @@ void print_usage(const char* prog_name) {
     std::cout << "  --packet-threshold <N>  Classify if flow exceeds N packets, 0=off (default: 0)\n";
     std::cout << "  --byte-threshold <N>    Classify if flow exceeds N bytes, 0=off (default: 0)\n";
     std::cout << "  --periodic-classify <N> Classify all active flows every N secs, 0=off (default: 0)\n";
+    std::cout << "  --verbose              Show ALL alerts including Normal (default: Malicious only)\n";
+    std::cout << "  --ignore-ip <ip>       Skip traffic to/from this IP (e.g. your own device)\n";
+    std::cout << "  --alert-log <path>     Save alerts to JSON file (append)\n";
+    std::cout << "  --scan-threshold <N>   Cross-flow scan: min ports/IPs to alert (default: 10)\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -95,6 +99,10 @@ int main(int argc, char* argv[]) {
     int packet_threshold = 0;   // 0 = disabled
     int byte_threshold = 0;     // 0 = disabled
     int periodic_classify = 0;  // 0 = disabled
+    bool verbose = false;
+    std::string ignore_ip;
+    std::string alert_log_path;
+    int scan_threshold = 10;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -116,6 +124,14 @@ int main(int argc, char* argv[]) {
             byte_threshold = std::stoi(argv[++i]);
         } else if (arg == "--periodic-classify" && i + 1 < argc) {
             periodic_classify = std::stoi(argv[++i]);
+        } else if (arg == "--verbose") {
+            verbose = true;
+        } else if (arg == "--ignore-ip" && i + 1 < argc) {
+            ignore_ip = argv[++i];
+        } else if (arg == "--alert-log" && i + 1 < argc) {
+            alert_log_path = argv[++i];
+        } else if (arg == "--scan-threshold" && i + 1 < argc) {
+            scan_threshold = std::stoi(argv[++i]);
         }
     }
 
@@ -131,6 +147,8 @@ int main(int argc, char* argv[]) {
     // Apply configurable timeouts
     nids->set_config(flow_timeout, cleanup_interval, max_duration,
                      packet_threshold, byte_threshold, periodic_classify);
+    nids->set_filter_options(verbose, ignore_ip);
+    nids->set_output_options(alert_log_path, scan_threshold);
 
     // Set alert callback
     nids->set_alert_callback(on_alert);

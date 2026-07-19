@@ -12,12 +12,13 @@ private:
     NidsCallback callback;
     mlpack::tree::RandomForest<> model;
     bool model_loaded = false;
+    std::thread capture_thread;
 
     // Placeholder capture loop — replaced by platform/ at build time
     void dummy_capture_loop() {
         spdlog::info("Starting dummy capture loop (placeholder)");
         // Simulate 5 test flows
-        for (int i = 0; i < 5; ++i) {
+        for (int i = 0; i < 5 && running; ++i) {
             NetworkFlow flow;
             flow.src_ip = "192.168.1.1";
             flow.dst_ip = "8.8.8.8";
@@ -53,6 +54,10 @@ private:
     }
 
 public:
+    ~NidsEngine() {
+        stop_capture();
+    }
+
     bool start_capture(const std::string& interface, const std::string& filter = "") override {
         if (running) {
             spdlog::warn("Capture is already running.");
@@ -60,13 +65,16 @@ public:
         }
         running = true;
         spdlog::info("Starting NIDS (placeholder) on interface: {}", interface);
-        std::thread([this]() { dummy_capture_loop(); running = false; }).detach();
+        capture_thread = std::thread([this]() { dummy_capture_loop(); running = false; });
         return true;
     }
 
     void stop_capture() override {
         running = false;
         spdlog::info("Stopping NIDS");
+        if (capture_thread.joinable()) {
+            capture_thread.join();
+        }
     }
 
     bool is_running() const override {
@@ -114,12 +122,19 @@ public:
     void set_config(int flow_timeout_sec, int cleanup_interval_sec,
                     int max_duration_sec = 0, int packet_threshold = 0,
                     int byte_threshold = 0, int periodic_classify_sec = 0) override {
-        (void)flow_timeout_sec;
-        (void)cleanup_interval_sec;
-        (void)max_duration_sec;
-        (void)packet_threshold;
-        (void)byte_threshold;
-        (void)periodic_classify_sec;
+        (void)flow_timeout_sec; (void)cleanup_interval_sec;
+        (void)max_duration_sec; (void)packet_threshold;
+        (void)byte_threshold; (void)periodic_classify_sec;
+    }
+
+    void set_filter_options(bool verbose, const std::string& ignore_ip = "") override {
+        (void)verbose; (void)ignore_ip;
+    }
+
+    void set_output_options(const std::string& alert_log = "",
+                            int scan_threshold = 10,
+                            int cross_flow_interval = 30) override {
+        (void)alert_log; (void)scan_threshold; (void)cross_flow_interval;
     }
 
     void set_alert_callback(NidsCallback cb) override {

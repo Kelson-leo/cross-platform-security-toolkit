@@ -19,6 +19,7 @@ CMakeUserPresets.json
 *.out
 *.so
 *.dll
+*.bin
 system_monitor
 packet_sniffer
 

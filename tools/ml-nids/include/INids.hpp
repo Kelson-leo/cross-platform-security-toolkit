@@ -83,6 +83,14 @@ public:
                             int byte_threshold = 0,
                             int periodic_classify_sec = 0) = 0;
 
+    // Filter options: show all alerts (verbose) and ignore a specific IP
+    virtual void set_filter_options(bool verbose, const std::string& ignore_ip = "") = 0;
+
+    // Output options: alert log file and cross-flow scan threshold
+    virtual void set_output_options(const std::string& alert_log = "",
+                                    int scan_threshold = 10,
+                                    int cross_flow_interval = 30) = 0;
+
     // Set the alert callback
     virtual void set_alert_callback(NidsCallback callback) = 0;
 
