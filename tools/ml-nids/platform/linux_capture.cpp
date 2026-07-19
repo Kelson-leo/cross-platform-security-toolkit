@@ -216,12 +216,16 @@ public:
         filter = filter_str;
         char errbuf[PCAP_ERRBUF_SIZE];
 
-        // 1ms read timeout so pcap_dispatch returns quickly and checks running flag.
-        // Combined with pcap_breakloop() in stop_capture(), shutdown is immediate.
-        pcap_handle = pcap_open_live(interface.c_str(), 65536, 1, 1, errbuf);
+        pcap_handle = pcap_open_live(interface.c_str(), 65536, 1, 100, errbuf);
         if (!pcap_handle) {
             spdlog::error("Failed to open interface {}: {}", interface, errbuf);
             return false;
+        }
+
+        // Non-blocking mode: pcap_next_ex returns immediately (0 if no packet).
+        // Shutdown is handled purely by the running flag — no pcap_breakloop needed.
+        if (pcap_setnonblock(pcap_handle, 1, errbuf) == -1) {
+            spdlog::warn("Failed to set non-blocking mode: {}", errbuf);
         }
 
         // Apply BPF filter if provided
@@ -247,23 +251,18 @@ public:
         capture_thread = std::thread([this]() {
             spdlog::info("Starting real capture loop on {}", interface);
             while (running) {
-                int ret = pcap_dispatch(
-                    pcap_handle, 100,
-                    [](unsigned char* user, const struct pcap_pkthdr* hdr, const unsigned char* pkt) {
-                        static_cast<LinuxNidsEngine*>(reinterpret_cast<void*>(user))->packet_handler(hdr, pkt);
-                    },
-                    reinterpret_cast<unsigned char*>(this));
+                struct pcap_pkthdr* header;
+                const u_char* packet;
+                int ret = pcap_next_ex(pcap_handle, &header, &packet);
 
-                if (ret < 0) {
-                    // -1 = error, -2 = pcap_breakloop() was called
-                    if (ret == -2) {
-                        spdlog::info("Capture loop interrupted by breakloop.");
-                    } else {
-                        spdlog::error("pcap_dispatch error: {}", pcap_geterr(pcap_handle));
-                    }
+                if (ret == 1) {
+                    packet_handler(header, packet);
+                } else if (ret < 0) {
+                    // -1 = error, -2 = EOF from pcap_close
                     break;
                 }
-                // ret >= 0: processed ret packets or timed out; loop continues
+                // ret == 0: no packet available (non-blocking mode)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             spdlog::info("Capture loop finished.");
         });
@@ -276,18 +275,11 @@ public:
         if (!running) return;
         running = false;
 
-        // Signal pcap to break out of its dispatch loop.
-        // With 1ms read timeout, pcap_dispatch returns within 1ms.
-        if (pcap_handle) {
-            pcap_breakloop(pcap_handle);
-        }
-
-        // Wait for capture thread to exit (returns within 1ms of breakloop)
+        // Thread will exit within 100ms (sleep_for in capture loop)
         if (capture_thread.joinable()) {
             capture_thread.join();
         }
 
-        // Safe to close now that thread has stopped
         if (pcap_handle) {
             pcap_close(pcap_handle);
             pcap_handle = nullptr;
