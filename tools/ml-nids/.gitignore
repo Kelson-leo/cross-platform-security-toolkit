@@ -1,0 +1,18 @@
+# Build and compilation
+build/
+
+# Dataset (19MB — too large for repo, download with instructions)
+data/
+
+# Local-only documentation and agent files
+docs/
+CLAUDE.md
+
+# Re-include the trained model (important for portfolio)
+!models/
+!models/nids_model.bin
+
+# IDE
+.vscode/
+.idea/
+*.swp
